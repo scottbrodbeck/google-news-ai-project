@@ -1,0 +1,28 @@
+# Copy to .dev.vars (Worker local dev) and/or .env (Node archive script).
+# For production, set the Worker ones with:  wrangler secret put NAME
+
+# Airtable — Personal Access Token, read-only, scoped to base appZn7eNiJ4BO89G1
+AIRTABLE_TOKEN=pat_xxx
+
+# Live feed access (private-by-obscurity + secret). Generate long random values:
+#   openssl rand -hex 24
+FEED_PATH_TOKEN=replace_with_32plus_char_random_token
+FEED_SECRET=replace_with_long_random_secret
+
+# Quarterly archive delivery
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/xxx/yyy/zzz
+RESEND_API_KEY=re_xxx
+ARCHIVE_EMAIL_TO=scott@arlnow.com,team@arlnow.com
+ARCHIVE_EMAIL_FROM=feeds@lnn.co
+
+# R2 (S3 API) — lets the archive script upload the zip. From Cloudflare > R2 > Manage API Tokens.
+R2_ACCOUNT_ID=your_cloudflare_account_id
+R2_ACCESS_KEY_ID=xxx
+R2_SECRET_ACCESS_KEY=xxx
+R2_BUCKET=google-news-feed
+# Public base URL of the deployed Worker — used to build the archive download link (/archive/<FEED_SECRET>/...)
+PUBLIC_BASE_URL=https://feeds.lnn.co
+
+# Optional — only if you later automate the Google Drive upload (service account JSON, single line)
+# GOOGLE_SA_JSON=
+# GOOGLE_DRIVE_PARENT_FOLDER_ID=
