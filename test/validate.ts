@@ -134,7 +134,21 @@ const plainOnly: ArticleRecord = {
   articlePlain: "First paragraph.\n\nSecond paragraph with > and &.",
 };
 
-// #7 nothing usable — must be skipped entirely.
+// #7 real LNN image-gallery markup — nav chrome ("Previous Image"/"1/2") and
+// javascript: links must be stripped; the article paragraph must survive.
+const gallery: ArticleRecord = {
+  id: "recGallery0000001",
+  uniqueId: "ga000001",
+  site: "ALXnow",
+  headline: "Photos: new mural downtown",
+  link: "https://www.alxnow.com/2026/06/26/photos-new-mural-downtown/",
+  publicationTime: "2026-06-26T11:00:00.000Z",
+  deleteFromFeed: false,
+  articleHtml: `<div class="lnn-gallery js-gallery block w-0 min-w-full mb-6"><div class="gallery__slider"><figure class="!mb-0"><div class="gallery__img"><img src="https://www.alxnow.com/files/2026/06/mural-1.jpg"/></div><figcaption class="gallery__meta hidden"><div class="meta__caption">The new mural (staff photo)</div></figcaption></figure></div><div class="gallery__footer"><div class="gallery__nav"><a class="nav__prev" href="javascript:void(0);" role="button"><span class="sr-only">Previous Image</span><svg viewBox="0 0 20 20"><path d="M1 2z"></path></svg></a><span class="nav__count">1/2</span><a class="nav__next" href="javascript:void(0);" role="button"><span class="sr-only">Next Image</span><svg viewBox="0 0 20 20"><path d="M1 2z"></path></svg></a></div></div></div>
+<p>A vibrant new mural appeared downtown this week, painted by <a href="https://www.alxnow.com/artists/">local artists</a>.</p>`,
+};
+
+// #8 nothing usable — must be skipped entirely.
 const empty: ArticleRecord = {
   id: "recEmpty000000000",
   uniqueId: "em000001",
@@ -145,7 +159,7 @@ const empty: ArticleRecord = {
   deleteFromFeed: false,
 };
 
-const fixtures = [poll, captioned, noImage, tombstone, special, plainOnly, empty];
+const fixtures = [poll, captioned, noImage, tombstone, special, plainOnly, gallery, empty];
 const meta: FeedMeta = {
   title: "Local News Now",
   link: "https://feeds.lnn.co/gn/TOKEN.xml",
@@ -188,11 +202,11 @@ check("does NOT declare or use atom: or dc:", () => {
 
 // ---- item selection ---------------------------------------------------------
 console.log("\nItem selection");
-check("live has 6 items (5 normal + 1 tombstone; empty skipped)", () =>
-  assert.equal(liveItems.length, 6)
+check("live has 7 items (6 normal + 1 tombstone; empty skipped)", () =>
+  assert.equal(liveItems.length, 7)
 );
-check("archive has 5 items (tombstone omitted + empty skipped)", () =>
-  assert.equal(archiveItems.length, 5)
+check("archive has 6 items (tombstone omitted + empty skipped)", () =>
+  assert.equal(archiveItems.length, 6)
 );
 check("empty-content article is skipped in both feeds", () => {
   assert.ok(!live.includes("/empty/"), "empty in live");
@@ -224,6 +238,13 @@ check("CDATA-wrapped content keeps the feed well-formed despite a stray ]]>", ()
 check("plain-text fallback wraps + escapes paragraphs", () => {
   assert.ok(live.includes("<p>First paragraph.</p>"), "first para not wrapped");
   assert.ok(live.includes("<p>Second paragraph with &gt; and &amp;.</p>"), "second para not escaped/wrapped");
+});
+check("image-gallery chrome (nav text, counter, javascript: links) is stripped", () => {
+  for (const junk of ["Previous Image", "Next Image", "1/2", "javascript:", "gallery__", "sr-only", "meta__caption"]) {
+    assert.ok(!live.includes(junk), `gallery junk leaked: ${junk}`);
+  }
+  // the actual article paragraph (and its safe link) survives
+  assert.ok(live.includes('<p>A vibrant new mural appeared downtown this week, painted by <a href="https://www.alxnow.com/artists/">local artists</a>.</p>'), "gallery article body lost");
 });
 
 // ---- images / media (live only) --------------------------------------------

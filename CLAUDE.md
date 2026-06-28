@@ -42,6 +42,11 @@ Archive files are bucketed by **America/New_York** calendar day (articles store 
 ## Sanitizer portability
 `sanitize.ts` uses `htmlparser2` (pure JS) so the same cleaner runs in the Worker and Node. If `wrangler deploy`/bundling ever complains about a Node built-in, swap the Worker's sanitize path for a Cloudflare `HTMLRewriter` implementation (strip `script/style/iframe/noscript/form/img`, keep the same tag allowlist) and keep htmlparser2 for the Node script. The render layer only depends on `sanitizeArticleHtml(html): string`.
 
+**Don't simplify these out — they handle real LNN markup (verified against live content):**
+- **Gallery/chrome stripping (`DROP_CLASS`).** LNN articles wrap lead images in `<div class="lnn-gallery js-gallery">` whose footer nav leaks `"Previous Image"`, `"Next Image"`, and a `"1/2"` slide counter as text. We drop the whole subtree of any element whose class matches `lnn-gallery`/`js-gallery`/`gallery__*`. Inline `<figure class="wp-caption">` images are already dropped by the `figure` rule (their caption still reaches the live feed's `media:title` via the `Photo caption` formula field, which is separate).
+- **`safeHref`** keeps only `http(s):`/`mailto:`/root-relative hrefs, dropping `javascript:` (gallery nav buttons) and `data:`.
+- **Void-aware skip counter.** Skip-depth counts non-void elements only, so a dropped subtree stays balanced regardless of whether htmlparser2 emits a close event for void tags (`img`, etc.).
+
 ## Worker specifics
 - Create R2 first: `wrangler r2 bucket create google-news-feed`.
 - The fetch handler serves the cached R2 object; if missing/stale (>5 min) it builds synchronously so Google never gets an empty response.
