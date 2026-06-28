@@ -16,7 +16,7 @@ import { AwsClient } from "aws4fetch";
 import { fetchArticles } from "../lib/airtable";
 import { buildFeed } from "../lib/render";
 import { FIELD_NAMES, SITES_IN_SCOPE } from "../lib/config";
-import { easternDayKey, easternYear, lastCompletedQuarter, parseQuarter, type Quarter } from "../lib/dates";
+import { easternDayKey, easternYear, lastCompletedQuarter, parseQuarter, quarterOfDay, type Quarter } from "../lib/dates";
 import { sendSlack, sendEmail } from "../lib/notify";
 import type { ArticleRecord } from "../lib/types";
 
@@ -28,15 +28,22 @@ function arg(name: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
-function siteQuarterFormula(site: string, q: Quarter): string {
+function siteWindowFormula(site: string, fromUTC: string, toUTC: string): string {
   // Padded UTC window; exact ET-day filtering happens below in JS.
   return (
     "AND(" +
     `{${FIELD_NAMES.site}}='${site}',` +
-    `IS_AFTER({${FIELD_NAMES.publicationTime}},DATETIME_PARSE('${q.fetchFromUTC}')),` +
-    `IS_BEFORE({${FIELD_NAMES.publicationTime}},DATETIME_PARSE('${q.fetchToUTC}'))` +
+    `IS_AFTER({${FIELD_NAMES.publicationTime}},DATETIME_PARSE('${fromUTC}')),` +
+    `IS_BEFORE({${FIELD_NAMES.publicationTime}},DATETIME_PARSE('${toUTC}'))` +
     ")"
   );
+}
+
+/** UTC instant for an ET day (YYYY-MM-DD) shifted by `deltaDays`, for padded Airtable bounds. */
+function dayBoundUTC(etDay: string, deltaDays: number): string {
+  const d = new Date(`${etDay}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + deltaDays);
+  return d.toISOString();
 }
 
 interface DayGroup {
@@ -48,10 +55,14 @@ interface DayGroup {
 
 async function collectGroups(q: Quarter, onlyDay?: string): Promise<DayGroup[]> {
   const groups = new Map<string, DayGroup>();
+  // For a single-day sample, scope the query to that ET day (±1 day for TZ slack);
+  // otherwise pull the whole quarter window. Exact ET-day filtering still happens in JS.
+  const fromUTC = onlyDay ? dayBoundUTC(onlyDay, -1) : q.fetchFromUTC;
+  const toUTC = onlyDay ? dayBoundUTC(onlyDay, 2) : q.fetchToUTC;
   for (const site of SITES_IN_SCOPE) {
     const rows = await fetchArticles({
       token: required("AIRTABLE_TOKEN"),
-      filterByFormula: siteQuarterFormula(site, q),
+      filterByFormula: siteWindowFormula(site, fromUTC, toUTC),
       sortFieldId: undefined,
     });
     for (const a of rows) {
@@ -149,7 +160,11 @@ function required(name: string): string {
 
 async function main(): Promise<void> {
   const sampleDay = arg("sample");
-  const q = arg("quarter") ? parseQuarter(arg("quarter")!) : lastCompletedQuarter();
+  const q = arg("quarter")
+    ? parseQuarter(arg("quarter")!)
+    : sampleDay
+      ? quarterOfDay(sampleDay) // scope a sample to the quarter containing that day
+      : lastCompletedQuarter();
 
   console.log(`Building ${sampleDay ? `sample day ${sampleDay}` : `quarter ${q.label}`} (ET ${q.etStart}..${q.etEnd})`);
   const groups = await collectGroups(q, sampleDay);

@@ -18,6 +18,7 @@ import { XMLValidator, XMLParser } from "fast-xml-parser";
 import { buildFeed, type FeedMeta } from "../src/lib/render";
 import { mapRow } from "../src/lib/airtable";
 import { FIELD_IDS } from "../src/lib/config";
+import { toRFC822, toISO8601Offset, easternDayKey, quarterOfDay } from "../src/lib/dates";
 import type { ArticleRecord } from "../src/lib/types";
 
 // ---- tiny test runner -------------------------------------------------------
@@ -357,6 +358,22 @@ check("absent checkbox -> false, absent/empty optionals -> undefined", () => {
   assert.equal(r.deleteFromFeed, false);
   assert.equal(r.photoCaption, undefined);
   assert.equal(r.author, undefined);
+});
+
+// ---- dates (bucketing + quarter math the archive depends on) ---------------
+console.log("\nDates");
+check("quarterOfDay maps a day to the quarter that contains it", () => {
+  assert.equal(quarterOfDay("2026-06-26").label, "2026-Q2");
+  assert.equal(quarterOfDay("2026-01-15").label, "2026-Q1");
+  assert.equal(quarterOfDay("2026-12-31").label, "2026-Q4");
+});
+check("easternDayKey buckets UTC instants by America/New_York day (incl. day boundary)", () => {
+  assert.equal(easternDayKey("2026-06-26T15:45:56.000Z"), "2026-06-26"); // 11:45 EDT
+  assert.equal(easternDayKey("2026-06-26T03:30:00.000Z"), "2026-06-25"); // 23:30 EDT, prior day
+});
+check("toRFC822 + toISO8601Offset emit the expected formats", () => {
+  assert.match(toRFC822("2026-06-26T15:45:56.000Z"), RFC822);
+  assert.equal(toISO8601Offset("2026-06-26T15:57:25.000Z"), "2026-06-26T15:57:25+00:00");
 });
 
 // ---- summary ----------------------------------------------------------------

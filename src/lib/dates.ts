@@ -60,6 +60,13 @@ export function parseQuarter(s: string): Quarter {
   return quarterOf(Number(m[1]), Number(m[2]) as 1 | 2 | 3 | 4);
 }
 
+/** The quarter that contains an ET calendar day "YYYY-MM-DD" (used to scope --sample). */
+export function quarterOfDay(etDay: string): Quarter {
+  const m = /^(\d{4})-(\d{2})-\d{2}$/.exec(etDay.trim());
+  if (!m) throw new Error(`Bad day "${etDay}" — expected YYYY-MM-DD`);
+  return quarterOf(Number(m[1]), Math.ceil(Number(m[2]) / 3) as 1 | 2 | 3 | 4);
+}
+
 export function lastCompletedQuarter(now: Date = new Date()): Quarter {
   const y = Number(easternYear(now));
   const month = Number(easternDayKey(now).slice(5, 7));
