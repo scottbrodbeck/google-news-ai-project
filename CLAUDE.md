@@ -53,10 +53,10 @@ Archive files are bucketed by **America/New_York** calendar day (articles store 
 - Routes: `/gn/<FEED_PATH_TOKEN>.xml?key=<FEED_SECRET>` (live) and `/archive/<FEED_SECRET>/<file>` (download-link target for the script's zips).
 
 ## Archive script specifics
-- Cloud schedule: **GitHub Actions** (`.github/workflows/archive.yml`) — quarterly cron `0 9 5 1,4,7,10 *` + `workflow_dispatch` (manual `quarter`/`sample` inputs). Reads secrets from the runner env: `npm run archive` uses `--env-file-if-exists=.dev.vars`, so a missing file falls back to `process.env`. Always attaches the zip as a run artifact; uploads to R2 + notifies only if those secrets are set.
+- Cloud schedule: **GitHub Actions** (`.github/workflows/archive.yml`), triggered by **Zapier** via `repository_dispatch` (event type `archive`). Zapier owns the quarterly schedule (Schedule → Code-by-Zapier POST), so the workflow has **no `schedule:` trigger** and GitHub's ~60-day auto-disable never applies. Also `workflow_dispatch` for manual `quarter`/`sample` runs (Zapier passes the same via `client_payload`). Reads secrets from the runner env: `npm run archive` uses `--env-file-if-exists=.dev.vars`, so a missing file falls back to `process.env`. Always attaches the zip as a run artifact; uploads to R2 if those secrets are set. On finish (success or failure) a step POSTs `{status, link, quarter, fileCount, sizeMB, run_url}` to `ZAPIER_WEBHOOK_URL`; `main()` writes `out/result.json` for that callback.
 - Run anywhere: `npm run archive` (last quarter) or `-- --quarter 2026-Q2` or `-- --sample 2026-06-26`. `--sample` derives its quarter from the day (`quarterOfDay`) and scopes the Airtable query to just that day.
 - Uploads the zip to R2 via the S3 API (`aws4fetch`); the download link points at the Worker's `/archive/...` route.
-- **⚠️ GitHub disables scheduled workflows after ~60 days of repo inactivity** — a quarterly cadence can hit this. GitHub emails before disabling (one-click re-enable). For bulletproof scheduling, fire the workflow from the Worker's `*/2` cron (which never disables) via `repository_dispatch` + a fine-grained PAT — not wired up yet.
+- Notifications are owned by Zapier (the callback above), so the workflow doesn't pass `SLACK_WEBHOOK_URL`/`RESEND_API_KEY` — those code paths still exist for local runs.
 - Optional future: direct Google Drive upload via a service account (JWT → Drive API) to remove the manual drag — stub it in `deliver()`/a new module; currently out of scope.
 
 ## Sanity checks when changing rendering

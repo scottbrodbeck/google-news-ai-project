@@ -127,7 +127,7 @@ async function uploadToR2(key: string, body: Uint8Array, contentType: string): P
   if (!res.ok) throw new Error(`R2 upload ${res.status}: ${await res.text()}`);
 }
 
-async function deliver(q: Quarter, fileCount: number, zipBytes: Uint8Array, key: string): Promise<void> {
+async function deliver(q: Quarter, fileCount: number, zipBytes: Uint8Array, key: string): Promise<string> {
   const base = env.PUBLIC_BASE_URL?.replace(/\/$/, "");
   const secret = env.FEED_SECRET;
   const link = base && secret ? `${base}/archive/${secret}/${key.replace(/^archive\//, "")}` : "(set PUBLIC_BASE_URL + FEED_SECRET for a link)";
@@ -150,6 +150,7 @@ async function deliver(q: Quarter, fileCount: number, zipBytes: Uint8Array, key:
   }
   console.log(summary);
   console.log(`link: ${link}`);
+  return link;
 }
 
 function required(name: string): string {
@@ -181,7 +182,25 @@ async function main(): Promise<void> {
 
   const key = `archive/${label}.zip`;
   await uploadToR2(key, zipBytes, "application/zip");
-  await deliver(q, fileNames.length, zipBytes, key);
+  const link = await deliver(q, fileNames.length, zipBytes, key);
+
+  // Machine-readable result for the GitHub Actions -> Zapier callback step.
+  await writeFile(
+    "out/result.json",
+    JSON.stringify(
+      {
+        label,
+        quarter: q.label,
+        sample: sampleDay ?? "",
+        fileCount: fileNames.length,
+        sizeMB: (zipBytes.length / 1024 / 1024).toFixed(1),
+        link,
+      },
+      null,
+      2
+    )
+  );
+  console.log("Wrote out/result.json");
 }
 
 main().catch((err) => {

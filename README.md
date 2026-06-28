@@ -56,8 +56,8 @@ npm run deploy     # production
 
 ## Quarterly archive (cloud — GitHub Actions)
 Runs entirely in the cloud via [.github/workflows/archive.yml](.github/workflows/archive.yml) — no local machine:
-- **Schedule:** `0 9 5 1,4,7,10 *` (09:00 UTC, the 5th of Jan/Apr/Jul/Oct) → generates the just-ended quarter.
-- **Manual / QA sample:** Actions tab → *Quarterly archive* → **Run workflow**, with an optional `quarter` (e.g. `2026-Q2`) or `sample` day (e.g. `2026-06-26`).
+- **Trigger:** Zapier owns the schedule and fires the job via `repository_dispatch` (event type `archive`) — so there's no `schedule:` and GitHub's ~60-day auto-disable doesn't apply. The run posts status + link back to a Zapier Catch Hook, which fans out to Slack + email.
+- **Manual / QA sample:** Actions tab → *Quarterly archive* → **Run workflow**, with an optional `quarter` (e.g. `2026-Q2`) or `sample` day (e.g. `2026-06-26`). Zapier can pass the same via `client_payload`.
 - Each run uploads the zip to R2 (powers the Worker download link) **and** attaches it as a downloadable run artifact, so you always get the file from the cloud.
 
 **GitHub Secrets** (Settings → Secrets and variables → Actions). Only `AIRTABLE_TOKEN` is required; the rest enable delivery and are skipped if unset:
@@ -67,10 +67,35 @@ Runs entirely in the cloud via [.github/workflows/archive.yml](.github/workflows
 | `AIRTABLE_TOKEN` | **required** — read the O&O base |
 | `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | upload the zip to R2 — create an R2 API token in Cloudflare → R2 → *Manage API Tokens* |
 | `PUBLIC_BASE_URL`, `FEED_SECRET` | build the `/archive/<FEED_SECRET>/…` download link the Worker serves |
-| `SLACK_WEBHOOK_URL` | Slack notice |
-| `RESEND_API_KEY`, `ARCHIVE_EMAIL_TO`, `ARCHIVE_EMAIL_FROM` | email notice |
+| `ZAPIER_WEBHOOK_URL` | Zapier Catch Hook URL — the run POSTs `{status, link, quarter, fileCount, sizeMB, run_url}` here; Zapier sends Slack + email |
 
-> ⚠️ GitHub auto-disables scheduled workflows after ~60 days of no repo activity, which a quarterly cadence can trip. GitHub emails first and you re-enable in one click; for fully hands-off reliability, trigger it from the Worker's cron via `repository_dispatch` (see CLAUDE.md).
+### Triggering from Zapier
+Two tiny Zaps:
+
+**Zap 1 — start the job (quarterly).** *Schedule by Zapier* (monthly, day 5) → *Filter* (only continue if the month is January / April / July / October) → *Code by Zapier (Run JavaScript)*. Set the step's **Input Data**: `token` = a GitHub PAT with **Contents: Read and write** on this repo, `owner` = `scottbrodbeck`, `repo` = `google-news-ai-project`, optional `sample` / `quarter`.
+
+```js
+const { token, owner, repo, sample, quarter } = inputData;
+const client_payload = {};
+if (sample) client_payload.sample = sample;       // e.g. 2026-06-26 (QA day)
+if (quarter) client_payload.quarter = quarter;    // e.g. 2026-Q2
+
+const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/dispatches`, {
+  method: "POST",
+  headers: {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "zapier-archive-trigger",
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({ event_type: "archive", client_payload }),
+});
+if (res.status !== 204) throw new Error(`GitHub dispatch failed: ${res.status} ${await res.text()}`);
+output = { triggered: true };
+```
+
+**Zap 2 — handle the result.** *Webhooks by Zapier → Catch Hook* → Slack + Email. Paste that Catch Hook URL into the **`ZAPIER_WEBHOOK_URL`** GitHub secret; every run POSTs its status + download link there when it finishes (success *or* failure).
 
 ### Run it manually / locally (optional)
 ```bash
