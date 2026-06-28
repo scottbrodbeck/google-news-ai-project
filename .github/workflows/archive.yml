@@ -1,0 +1,72 @@
+name: Quarterly archive
+
+# Cloud scheduler for the quarterly archive (replaces the "always-on box").
+# Runs the same src/scripts/archive.ts the local `npm run archive` uses.
+on:
+  schedule:
+    # 09:00 UTC on the 5th of Jan/Apr/Jul/Oct — generates the just-ended quarter
+    # (buffer before Google's 10-day deadline; see spec §5.5).
+    - cron: "0 9 5 1,4,7,10 *"
+  workflow_dispatch:
+    inputs:
+      quarter:
+        description: "Quarter, e.g. 2026-Q2 (blank = last completed quarter)"
+        required: false
+        type: string
+      sample:
+        description: "Single ET day for Google QA, e.g. 2026-06-26 (overrides quarter)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quarterly-archive
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - name: Generate archive
+        env:
+          # Required to read Airtable. Everything below is optional: if a secret
+          # is unset it arrives as "" and the script cleanly skips that delivery.
+          AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
+          # R2 upload (so the Worker's /archive/<FEED_SECRET>/… download link works)
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          PUBLIC_BASE_URL: ${{ secrets.PUBLIC_BASE_URL }}
+          FEED_SECRET: ${{ secrets.FEED_SECRET }}
+          # Notifications
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          ARCHIVE_EMAIL_TO: ${{ secrets.ARCHIVE_EMAIL_TO }}
+          ARCHIVE_EMAIL_FROM: ${{ secrets.ARCHIVE_EMAIL_FROM }}
+          # workflow_dispatch inputs, passed via env to avoid shell injection
+          SAMPLE: ${{ inputs.sample }}
+          QUARTER: ${{ inputs.quarter }}
+        run: |
+          ARGS=""
+          [ -n "$SAMPLE" ] && ARGS="--sample $SAMPLE"
+          [ -n "$QUARTER" ] && ARGS="$ARGS --quarter $QUARTER"
+          echo "Running: npm run archive -- $ARGS"
+          npm run archive -- $ARGS
+      - name: Upload zip as a run artifact
+        if: always() # keep the local zip even if R2 upload / notify isn't configured
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-news-archive
+          path: out/*.zip
+          if-no-files-found: warn
+          retention-days: 90

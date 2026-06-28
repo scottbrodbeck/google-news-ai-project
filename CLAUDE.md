@@ -5,7 +5,7 @@ Context for finishing/maintaining the Google News AI pilot feed system. Read alo
 ## What this is
 Two jobs, one codebase, sharing `src/lib/`:
 - **Live feed** → Cloudflare Worker (`src/worker/index.ts`): serves a private RSS endpoint Google crawls every couple of minutes, rebuilt to R2 on a `*/2` cron.
-- **Quarterly archive** → Node script (`src/scripts/archive.ts`), meant to run on the always-on Ubuntu box (heavier than a Worker cron is comfortable with).
+- **Quarterly archive** → Node script (`src/scripts/archive.ts`) run by a **GitHub Actions cron** (`.github/workflows/archive.yml`) — cloud, no local box. Kept off the Worker cron because a full quarter is heavier than a 128 MB isolate is comfortable with. Still runnable anywhere via `npm run archive`.
 
 Data source: Airtable `News articles` / `O&O` (`appZn7eNiJ4BO89G1` / `tblrMZhmQKluhERnP`), maintained by Zapier. **Read-only — never write to it.**
 
@@ -53,8 +53,10 @@ Archive files are bucketed by **America/New_York** calendar day (articles store 
 - Routes: `/gn/<FEED_PATH_TOKEN>.xml?key=<FEED_SECRET>` (live) and `/archive/<FEED_SECRET>/<file>` (download-link target for the script's zips).
 
 ## Archive script specifics
-- Run: `npm run archive` (last quarter) or `--quarter 2026-Q2` or `--sample 2026-06-26`.
-- Uploads the zip to R2 via the S3 API (`aws4fetch`), then the download link points at the Worker's `/archive/...` route.
+- Cloud schedule: **GitHub Actions** (`.github/workflows/archive.yml`) — quarterly cron `0 9 5 1,4,7,10 *` + `workflow_dispatch` (manual `quarter`/`sample` inputs). Reads secrets from the runner env: `npm run archive` uses `--env-file-if-exists=.dev.vars`, so a missing file falls back to `process.env`. Always attaches the zip as a run artifact; uploads to R2 + notifies only if those secrets are set.
+- Run anywhere: `npm run archive` (last quarter) or `-- --quarter 2026-Q2` or `-- --sample 2026-06-26`. `--sample` derives its quarter from the day (`quarterOfDay`) and scopes the Airtable query to just that day.
+- Uploads the zip to R2 via the S3 API (`aws4fetch`); the download link points at the Worker's `/archive/...` route.
+- **⚠️ GitHub disables scheduled workflows after ~60 days of repo inactivity** — a quarterly cadence can hit this. GitHub emails before disabling (one-click re-enable). For bulletproof scheduling, fire the workflow from the Worker's `*/2` cron (which never disables) via `repository_dispatch` + a fine-grained PAT — not wired up yet.
 - Optional future: direct Google Drive upload via a service account (JWT → Drive API) to remove the manual drag — stub it in `deliver()`/a new module; currently out of scope.
 
 ## Sanity checks when changing rendering

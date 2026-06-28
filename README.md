@@ -54,14 +54,31 @@ npm run deploy     # production
 - URL: `https://feeds.lnn.co/gn/<FEED_PATH_TOKEN>.xml?key=<FEED_SECRET>` (or the `*.workers.dev` URL until the custom domain is added).
 - Submit that full URL (with `?key=`) to Google via the Contact Us form as a query-string API-key feed.
 
-## Quarterly archive
+## Quarterly archive (cloud — GitHub Actions)
+Runs entirely in the cloud via [.github/workflows/archive.yml](.github/workflows/archive.yml) — no local machine:
+- **Schedule:** `0 9 5 1,4,7,10 *` (09:00 UTC, the 5th of Jan/Apr/Jul/Oct) → generates the just-ended quarter.
+- **Manual / QA sample:** Actions tab → *Quarterly archive* → **Run workflow**, with an optional `quarter` (e.g. `2026-Q2`) or `sample` day (e.g. `2026-06-26`).
+- Each run uploads the zip to R2 (powers the Worker download link) **and** attaches it as a downloadable run artifact, so you always get the file from the cloud.
+
+**GitHub Secrets** (Settings → Secrets and variables → Actions). Only `AIRTABLE_TOKEN` is required; the rest enable delivery and are skipped if unset:
+
+| Secret | Needed for |
+|---|---|
+| `AIRTABLE_TOKEN` | **required** — read the O&O base |
+| `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET` | upload the zip to R2 — create an R2 API token in Cloudflare → R2 → *Manage API Tokens* |
+| `PUBLIC_BASE_URL`, `FEED_SECRET` | build the `/archive/<FEED_SECRET>/…` download link the Worker serves |
+| `SLACK_WEBHOOK_URL` | Slack notice |
+| `RESEND_API_KEY`, `ARCHIVE_EMAIL_TO`, `ARCHIVE_EMAIL_FROM` | email notice |
+
+> ⚠️ GitHub auto-disables scheduled workflows after ~60 days of no repo activity, which a quarterly cadence can trip. GitHub emails first and you re-enable in one click; for fully hands-off reliability, trigger it from the Worker's cron via `repository_dispatch` (see CLAUDE.md).
+
+### Run it manually / locally (optional)
 ```bash
 npm run archive                              # last completed quarter
 npm run archive -- --quarter 2026-Q2
 npm run archive -- --sample 2026-06-26       # one ET day for Google QA
 ```
-Reads env from `.dev.vars` if present, else the process env (handy on the always-on box). Only `AIRTABLE_TOKEN` is required to write the local `out/<label>.zip`; R2/Slack/Resend vars are optional and, if unset, upload + notify are skipped.
-Produces `out/<label>.zip`, uploads to R2, and posts a download link to Slack + email. Download, unzip, drag the publication folders into the shared Drive folder. Schedule on the box ~5 days after each quarter ends (cron: `0 9 5 1,4,7,10 *`).
+Reads env from `.dev.vars` if present, else the process env. Only `AIRTABLE_TOKEN` is required to write `out/<label>.zip`; R2/Slack/Resend are optional. The one human step each quarter: download the zip and drop the folders into the shared Drive folder (removable later via the optional Drive service-account upload).
 
 ## robots.txt (do on each site, by you)
 On **arlnow.com, alxnow.com, ffxnow.com** ensure Google-Extended isn't blocked:
