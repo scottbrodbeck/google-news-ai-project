@@ -56,10 +56,11 @@ npm run deploy     # production
 
 ## Quarterly archive
 ```bash
-npm run archive                                   # last completed quarter
-npx tsx --env-file=.dev.vars src/scripts/archive.ts --quarter 2026-Q2
-npx tsx --env-file=.dev.vars src/scripts/archive.ts --sample 2026-06-26   # one ET day for Google QA
+npm run archive                              # last completed quarter
+npm run archive -- --quarter 2026-Q2
+npm run archive -- --sample 2026-06-26       # one ET day for Google QA
 ```
+Reads env from `.dev.vars` if present, else the process env (handy on the always-on box). Only `AIRTABLE_TOKEN` is required to write the local `out/<label>.zip`; R2/Slack/Resend vars are optional and, if unset, upload + notify are skipped.
 Produces `out/<label>.zip`, uploads to R2, and posts a download link to Slack + email. Download, unzip, drag the publication folders into the shared Drive folder. Schedule on the box ~5 days after each quarter ends (cron: `0 9 5 1,4,7,10 *`).
 
 ## robots.txt (do on each site, by you)

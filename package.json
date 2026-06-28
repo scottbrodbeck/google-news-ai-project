@@ -9,7 +9,7 @@
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
     "typecheck": "tsc -p tsconfig.worker.json && tsc -p tsconfig.node.json",
-    "archive": "tsx --env-file=.dev.vars src/scripts/archive.ts",
+    "archive": "tsx --env-file-if-exists=.dev.vars src/scripts/archive.ts",
     "test": "tsx test/validate.ts"
   },
   "dependencies": {

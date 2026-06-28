@@ -97,6 +97,13 @@ export default {
     const url = new URL(req.url);
     const path = url.pathname;
 
+    // Keep the private feed host out of search indexes (nothing here should be crawled).
+    if (path === "/robots.txt") {
+      return new Response("User-agent: *\nDisallow: /\n", {
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+      });
+    }
+
     // --- Live feed: /gn/<token>.xml?key=<secret> ---
     if (path === `/gn/${env.FEED_PATH_TOKEN}.xml`) {
       if (url.searchParams.get("key") !== env.FEED_SECRET) return notFound();
