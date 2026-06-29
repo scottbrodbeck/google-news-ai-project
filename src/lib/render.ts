@@ -1,5 +1,5 @@
 import type { ArticleRecord } from "./types";
-import { sanitizeArticleHtml } from "./sanitize";
+import { sanitizeArticleHtml, decodeEntitiesText } from "./sanitize";
 import { toRFC822, toISO8601Offset } from "./dates";
 import { GENRE_RULES } from "./config";
 
@@ -92,7 +92,7 @@ export function renderItem(a: ArticleRecord, opts: RenderOpts): string {
     if (img) {
       if (a.photoCaption) {
         lines.push(`      <media:content url="${xmlEscape(img)}" medium="image">`);
-        lines.push(`        <media:title>${xmlEscape(a.photoCaption)}</media:title>`);
+        lines.push(`        <media:title>${xmlEscape(decodeEntitiesText(a.photoCaption))}</media:title>`);
         lines.push("      </media:content>");
       } else {
         lines.push(`      <media:content url="${xmlEscape(img)}" medium="image"/>`);

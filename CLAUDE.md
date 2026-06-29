@@ -26,7 +26,7 @@ All field IDs live in `src/lib/config.ts`, including `FIELD_IDS.deleteFromFeed =
 **Verified against the live base 2026-06-26** (all 15 field IDs correct). Types that drove design choices:
 - `Full Res Image` + `Image URL` are **`url`** fields → plain strings (not attachments), so `airtable.ts`'s `str()` mapper is correct as-is.
 - `Site` is a **`singleSelect`**; the raw REST API returns the option **name** as a string ("ARLnow"), which is what `{Site}='ARLnow'` in `filterByFormula` and `SITES_IN_SCOPE` expect.
-- `Photo caption` + `Unique ID` are **formula** fields (string results); empty caption is omitted from the response → `media:title` dropped automatically.
+- `Photo caption` + `Unique ID` are **formula** fields (string results); empty caption is omitted from the response → `media:title` dropped automatically. The caption is regex-extracted from raw article HTML, so it carries HTML entities (`&#8217;`, `&amp;`) — `render` runs it through `decodeEntitiesText` before XML-escaping so `media:title` isn't double-escaped.
 - `Last Updated` is a **`lastModifiedTime`** field (good — spec §9.2 ideal) watching Headline, Article, Link, Category, Image URL, Author. **It does NOT watch `Delete from Google Feed`** — see the tombstone caveat below.
 - `Publication time`/`Last Updated` come back as UTC ISO (`...Z`) regardless of display TZ.
 

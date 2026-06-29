@@ -78,8 +78,9 @@ const captioned: ArticleRecord = {
   category: "News,Northfax,Parks",
   fullResImage: "https://www.ffxnow.com/files/2026/06/Screenshot-2026-06-26-095753.jpg",
   imageUrl: "https://lnnhub.s3.us-east-1.amazonaws.com/img/ffxnow-42424.jpg",
+  // caption carries raw-HTML entities, exactly like the Airtable formula returns them
   photoCaption:
-    "A mock-up of what stormwater management facilities in the future Northfax Linear Park might look like during peak rainfall (via City of Fairfax)",
+    "A mock-up of what stormwater management facilities in the future Northfax Linear Park might look like during peak rainfall (via City of Fairfax&#8217;s planning team &amp; staff)",
   deleteFromFeed: false,
   articleHtml: `<p>The City of Fairfax is planning a new <a href="https://www.ffxnow.com/tag/parks/">linear park</a> in the Northfax area.</p><p>Construction could begin next year.</p>`,
 };
@@ -260,6 +261,11 @@ check("live: media:title emitted only when a caption exists", () => {
   assert.ok(live.includes("<media:title>A mock-up of what stormwater"), "caption missing");
   // poll record has an image but no caption -> self-closing media:content, no media:title for it
   assert.ok(live.includes('medium="image"/>'), "expected a caption-less self-closing media:content");
+});
+check("media:title decodes HTML entities from the raw-HTML caption (no double-escaping)", () => {
+  // &#8217; -> ’ (literal), &amp; -> & then single-escaped back to &amp;
+  assert.ok(live.includes("(via City of Fairfax’s planning team &amp; staff)"), "caption entities not decoded/cleanly escaped");
+  assert.ok(!/&amp;#/.test(live), "a double-escaped entity (&amp;#…) is present");
 });
 check("archive: NO media:* elements at all", () =>
   assert.ok(!/<media:/.test(archive), "media present in archive")

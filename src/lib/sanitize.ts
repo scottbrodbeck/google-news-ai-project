@@ -94,3 +94,18 @@ export function sanitizeArticleHtml(html: string | undefined): string {
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
+
+/**
+ * Decode HTML entities in a plain-text string — for fields lifted out of raw
+ * article HTML (e.g. the Photo caption formula returns "Sheriff&#8217;s",
+ * "Finn &#038; Fire"). Without this they'd be XML-escaped a second time and
+ * surface to readers as a literal "&#8217;". Tag-free: collects text only.
+ */
+export function decodeEntitiesText(s: string | undefined): string {
+  if (!s) return "";
+  let out = "";
+  const parser = new Parser({ ontext(t) { out += t; } }, { decodeEntities: true });
+  parser.write(s);
+  parser.end();
+  return out;
+}
