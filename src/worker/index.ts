@@ -1,6 +1,8 @@
 import { fetchArticles } from "../lib/airtable";
 import { buildFeed } from "../lib/render";
-import { FIELD_IDS, FIELD_NAMES, SITES_IN_SCOPE } from "../lib/config";
+import { FIELD_IDS, FIELD_NAMES, SITES_IN_SCOPE, SITE_WP_BASE, WP_SEEN_CAP } from "../lib/config";
+import { fetchRecentPosts, selectNewPosts, toWebhookPayload, type WpPost } from "../lib/wordpress";
+import type { SiteName } from "../lib/types";
 
 /** Worker bindings + vars + secrets. */
 export interface Env {
@@ -12,6 +14,10 @@ export interface Env {
   CHANNEL_DESCRIPTION: string;
   WINDOW_DAYS: string;
   TOMBSTONE_DAYS: string;
+  // Publish poller (WordPress REST -> same Zapier webhook). INGEST_WEBHOOK_URL is a secret.
+  INGEST_WEBHOOK_URL?: string;
+  WP_POLL_ENABLED?: string;
+  WP_DRY_RUN?: string;
 }
 
 const LIVE_KEY = "live/google-news.xml";
@@ -77,6 +83,87 @@ async function writeLive(env: Env): Promise<void> {
   console.log(`live rebuilt: ${built.count} items, ${built.bytes} bytes`);
 }
 
+// --- Publish poller: WordPress REST -> same Zapier webhook (replaces the WP plugin) ---
+const seenKey = (site: string) => `state/wp-seen-${site}.json`;
+interface SeenState {
+  ids: number[];
+  updatedAt: string;
+}
+
+async function loadSeenIds(env: Env, site: string): Promise<number[] | null> {
+  const obj = await env.FEED_BUCKET.get(seenKey(site));
+  if (!obj) return null;
+  const s = await obj.json<SeenState>().catch(() => null);
+  return s?.ids ?? null;
+}
+
+async function saveSeenIds(env: Env, site: string, ids: number[]): Promise<void> {
+  const capped = ids.slice(-WP_SEEN_CAP); // keep only the most recent ids
+  await env.FEED_BUCKET.put(seenKey(site), JSON.stringify({ ids: capped, updatedAt: new Date().toISOString() }), {
+    httpMetadata: { contentType: "application/json" },
+  });
+}
+
+/** Read-only: fetch recent posts and determine which are new. `bootstrap` = first run for this site. */
+async function newPostsForSite(
+  env: Env,
+  site: SiteName
+): Promise<{ bootstrap: boolean; fresh: WpPost[]; allIds: number[]; priorIds: number[] }> {
+  const posts = await fetchRecentPosts(SITE_WP_BASE[site]);
+  const allIds = posts.map((p) => p.id);
+  const priorIds = await loadSeenIds(env, site);
+  if (priorIds === null) return { bootstrap: true, fresh: [], allIds, priorIds: [] };
+  return { bootstrap: false, fresh: selectNewPosts(posts, priorIds), allIds, priorIds };
+}
+
+/** Poll one site and fire the webhook for new posts. Dedup by WP post id, persisted in R2. */
+async function pollSite(env: Env, site: SiteName, dryRun: boolean): Promise<void> {
+  const { bootstrap, fresh, allIds, priorIds } = await newPostsForSite(env, site);
+  if (bootstrap) {
+    // First run: remember what's already published, fire nothing (avoids a burst on activation).
+    await saveSeenIds(env, site, allIds);
+    console.log(`[wp-poll] ${site}: bootstrapped ${allIds.length} seen ids (no webhooks fired)`);
+    return;
+  }
+  const seen = [...priorIds];
+  for (const post of fresh) {
+    const payload = toWebhookPayload(post);
+    try {
+      if (dryRun) {
+        console.log(`[wp-poll] ${site} DRY-RUN would fire id=${post.id} "${payload.Headline}"`);
+      } else {
+        const res = await fetch(env.INGEST_WEBHOOK_URL!, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error(`webhook ${res.status}: ${await res.text()}`);
+        console.log(`[wp-poll] ${site} fired id=${post.id} "${payload.Headline}"`);
+      }
+      seen.push(post.id); // mark seen only after a successful fire (or in dry-run)
+    } catch (err) {
+      // Leave unseen -> retried next cron. The Zap dedups by Link, so a retry can't duplicate.
+      console.error(`[wp-poll] ${site} id=${post.id} failed: ${(err as Error).message}`);
+    }
+  }
+  if (seen.length !== priorIds.length) await saveSeenIds(env, site, seen);
+}
+
+async function pollAndNotify(env: Env): Promise<void> {
+  const dryRun = env.WP_DRY_RUN === "true";
+  if (!dryRun && !env.INGEST_WEBHOOK_URL) {
+    console.error("[wp-poll] enabled but INGEST_WEBHOOK_URL is unset — skipping");
+    return;
+  }
+  for (const site of SITES_IN_SCOPE) {
+    try {
+      await pollSite(env, site, dryRun);
+    } catch (err) {
+      console.error(`[wp-poll] ${site} poll error: ${(err as Error).message}`);
+    }
+  }
+}
+
 function rss(xml: string): Response {
   return new Response(xml, {
     headers: { "Content-Type": "application/rss+xml; charset=utf-8", "Cache-Control": "public, max-age=120" },
@@ -91,6 +178,7 @@ export default {
   // Cron (*/2): rebuild the cached live feed.
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(writeLive(env));
+    if (env.WP_POLL_ENABLED === "true") ctx.waitUntil(pollAndNotify(env));
   },
 
   async fetch(req: Request, env: Env): Promise<Response> {
@@ -101,6 +189,25 @@ export default {
     if (path === "/robots.txt") {
       return new Response("User-agent: *\nDisallow: /\n", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
+      });
+    }
+
+    // --- Poller preview (read-only): /gn/poll?key=<secret> — shows what WOULD fire, no side effects ---
+    if (path === "/gn/poll") {
+      if (url.searchParams.get("key") !== env.FEED_SECRET) return notFound();
+      const report: Record<string, unknown> = {};
+      for (const site of SITES_IN_SCOPE) {
+        try {
+          const { bootstrap, fresh, allIds } = await newPostsForSite(env, site);
+          report[site] = bootstrap
+            ? { bootstrap: true, seenIfActivated: allIds.length }
+            : { wouldFire: fresh.map((p) => ({ id: p.id, headline: toWebhookPayload(p).Headline })) };
+        } catch (err) {
+          report[site] = { error: (err as Error).message };
+        }
+      }
+      return new Response(JSON.stringify(report, null, 2), {
+        headers: { "Content-Type": "application/json; charset=utf-8" },
       });
     }
 

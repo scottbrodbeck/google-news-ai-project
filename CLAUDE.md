@@ -52,6 +52,15 @@ Archive files are bucketed by **America/New_York** calendar day (articles store 
 - The fetch handler serves the cached R2 object; if missing/stale (>5 min) it builds synchronously so Google never gets an empty response.
 - Routes: `/gn/<FEED_PATH_TOKEN>.xml?key=<FEED_SECRET>` (live) and `/archive/<FEED_SECRET>/<file>` (download-link target for the script's zips).
 
+## Publish poller (WordPress → same Zapier webhook)
+`src/lib/wordpress.ts` + `pollAndNotify` in the Worker replace the WordPress publish plugin's one job: POST to the Zapier catch-hook on publish. **Additive** — the feed/archive pipeline and Airtable are untouched; this only adds a task to `scheduled()`.
+- Runs inside the existing `*/2` `scheduled()` handler, only when `WP_POLL_ENABLED="true"`. Polls each site's cachebusted REST API (`/wp-json/wp/v2/posts?…&_cb=<ts>`), and for each **new** post (dedup by WordPress post id) POSTs `toWebhookPayload(post)` to `INGEST_WEBHOOK_URL` (a secret). Payload keys mirror the plugin exactly: `URL, Headline, Time, Categories, Excerpt, Image, Article, Author`.
+- **Dedup state** = a per-site seen-id list in the existing R2 bucket (`state/wp-seen-<site>.json`, capped at `WP_SEEN_CAP`). No new binding/DB.
+- **Bootstrap:** first run per site records current post ids as seen and fires nothing (prevents a burst on activation).
+- **`WP_DRY_RUN="true"`** detects + logs new posts but doesn't POST — safe validation. **Preview route** (read-only): `GET /gn/poll?key=<FEED_SECRET>` → JSON of what would fire per site.
+- Safe alongside the live plugin: the Zap dedups by Link, so overlapping fires are filtered — retire the plugin on your own schedule. New-post→webhook latency is up to ~2 min (vs instant plugin).
+- Mapping notes: use site-local `date` for `Time` (WP `date_gmt` lacks `Z`; the Zap treats input as US/Eastern); byline from `author_names` (PublishPress), not the core author embed; `.rendered` fields are entity-decoded via `decodeEntitiesText`; `Categories` excludes tags; `Image` prefers the full-size original.
+
 ## Archive script specifics
 - Cloud schedule: **GitHub Actions** (`.github/workflows/archive.yml`), triggered by **Zapier** via `repository_dispatch` (event type `archive`). Zapier owns the quarterly schedule (Schedule → Code-by-Zapier POST), so the workflow has **no `schedule:` trigger** and GitHub's ~60-day auto-disable never applies. Also `workflow_dispatch` for manual `quarter`/`sample` runs (Zapier passes the same via `client_payload`). Reads secrets from the runner env: `npm run archive` uses `--env-file-if-exists=.dev.vars`, so a missing file falls back to `process.env`. Always attaches the zip as a run artifact; uploads to R2 if those secrets are set. On finish (success or failure) a step POSTs `{status, link, quarter, fileCount, sizeMB, run_url}` to `ZAPIER_WEBHOOK_URL`; `main()` writes `out/result.json` for that callback.
 - Run anywhere: `npm run archive` (last quarter) or `-- --quarter 2026-Q2` or `-- --sample 2026-06-26`. `--sample` derives its quarter from the day (`quarterOfDay`) and scopes the Airtable query to just that day.

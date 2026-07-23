@@ -23,6 +23,13 @@ R2_BUCKET=google-news-feed
 # Public base URL of the deployed Worker — used to build the archive download link (/archive/<FEED_SECRET>/...)
 PUBLIC_BASE_URL=https://feeds.lnn.co
 
+# Publish poller (WordPress REST -> same Zapier webhook). In prod set INGEST_WEBHOOK_URL
+# with `wrangler secret put`. Keep WP_POLL_ENABLED=false until cutover; WP_DRY_RUN=true
+# detects + logs new posts without POSTing the webhook.
+INGEST_WEBHOOK_URL=https://hooks.zapier.com/hooks/catch/xxxxxxx/yyyyyyy
+WP_POLL_ENABLED=false
+WP_DRY_RUN=true
+
 # Optional — only if you later automate the Google Drive upload (service account JSON, single line)
 # GOOGLE_SA_JSON=
 # GOOGLE_DRIVE_PARENT_FOLDER_ID=

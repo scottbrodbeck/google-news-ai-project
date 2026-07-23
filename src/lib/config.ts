@@ -32,6 +32,17 @@ export const FIELD_NAMES = {
 
 export const SITES_IN_SCOPE: readonly SiteName[] = ["ARLnow", "ALXnow", "FFXnow"];
 
+/** Public WordPress REST base per site — used by the publish poller (src/lib/wordpress.ts). */
+export const SITE_WP_BASE: Record<SiteName, string> = {
+  ARLnow: "https://www.arlnow.com",
+  ALXnow: "https://www.alxnow.com",
+  FFXnow: "https://www.ffxnow.com",
+};
+
+/** Poller tuning: posts pulled per site per poll, and how many recent post IDs to remember for dedup. */
+export const WP_POLL_PER_PAGE = 20;
+export const WP_SEEN_CAP = 300;
+
 /**
  * licensed_news:genre derivation from the free-text Category field.
  * First match wins; if nothing matches, the element is omitted.

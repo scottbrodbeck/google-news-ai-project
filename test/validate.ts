@@ -20,6 +20,7 @@ import { mapRow } from "../src/lib/airtable";
 import { FIELD_IDS } from "../src/lib/config";
 import { toRFC822, toISO8601Offset, easternDayKey, quarterOfDay } from "../src/lib/dates";
 import type { ArticleRecord } from "../src/lib/types";
+import { toWebhookPayload, selectNewPosts, type WpPost } from "../src/lib/wordpress";
 
 // ---- tiny test runner -------------------------------------------------------
 let passed = 0;
@@ -380,6 +381,63 @@ check("easternDayKey buckets UTC instants by America/New_York day (incl. day bou
 check("toRFC822 + toISO8601Offset emit the expected formats", () => {
   assert.match(toRFC822("2026-06-26T15:45:56.000Z"), RFC822);
   assert.equal(toISO8601Offset("2026-06-26T15:57:25.000Z"), "2026-06-26T15:57:25+00:00");
+});
+
+// ---- WordPress publish poller (payload parity + dedup) ----------------------
+console.log("\nWordPress poller");
+const wpPost: WpPost = {
+  id: 42430,
+  link: "https://www.alxnow.com/2026/06/26/finn-fire-brings-peruvian-nikkei-cuisine-to-old-town/",
+  date: "2026-06-26T12:30:00",
+  date_gmt: "2026-06-26T16:30:00",
+  title: { rendered: "Finn &#038; Fire brings Peruvian Nikkei cuisine to Old Town" },
+  excerpt: { rendered: "<p>An upscale Peruvian &amp; Japanese fusion spot opened&#8230;</p>\n" },
+  content: { rendered: "<p>Finn &amp; Fire began its soft opening.</p>" },
+  author_names: ["Emily Leayman", "Jane Roe"], // PublishPress returns an array
+  _embedded: {
+    author: [{ name: "alxnow" }],
+    "wp:featuredmedia": [
+      {
+        source_url: "https://www.alxnow.com/files/2026/06/finn-and-fire-2.jpg",
+        media_details: { sizes: { full: { source_url: "https://www.alxnow.com/files/2026/06/finn-and-fire-2.jpg" } } },
+      },
+    ],
+    "wp:term": [
+      [
+        { name: "Around Town", taxonomy: "category" },
+        { name: "New Restaurant", taxonomy: "category" },
+      ],
+      [{ name: "old-town", taxonomy: "post_tag" }],
+    ],
+  },
+};
+check("toWebhookPayload emits exactly the 8 plugin keys", () =>
+  assert.deepEqual(Object.keys(toWebhookPayload(wpPost)).sort(), [
+    "Article", "Author", "Categories", "Excerpt", "Headline", "Image", "Time", "URL",
+  ])
+);
+check("toWebhookPayload decodes Headline; keeps Article as raw HTML; Time is site-local", () => {
+  const p = toWebhookPayload(wpPost);
+  assert.equal(p.Headline, "Finn & Fire brings Peruvian Nikkei cuisine to Old Town");
+  assert.equal(p.Article, "<p>Finn &amp; Fire began its soft opening.</p>");
+  assert.equal(p.Time, "2026-06-26T12:30:00");
+  assert.equal(p.URL, wpPost.link);
+  assert.equal(p.Author, "Emily Leayman, Jane Roe"); // array byline joined
+});
+check("toWebhookPayload: Categories excludes tags; Image prefers full size; Excerpt decoded + stripped", () => {
+  const p = toWebhookPayload(wpPost);
+  assert.equal(p.Categories, "Around Town,New Restaurant");
+  assert.equal(p.Image, "https://www.alxnow.com/files/2026/06/finn-and-fire-2.jpg");
+  assert.equal(p.Excerpt, "An upscale Peruvian & Japanese fusion spot opened…");
+});
+check("selectNewPosts returns unseen ids oldest-first; all-seen -> none", () => {
+  const posts = [
+    { id: 3, date: "2026-06-26T03:00:00" },
+    { id: 1, date: "2026-06-26T01:00:00" },
+    { id: 2, date: "2026-06-26T02:00:00" },
+  ] as WpPost[];
+  assert.deepEqual(selectNewPosts(posts, [2]).map((p) => p.id), [1, 3]);
+  assert.deepEqual(selectNewPosts(posts, [1, 2, 3]).map((p) => p.id), []);
 });
 
 // ---- summary ----------------------------------------------------------------
