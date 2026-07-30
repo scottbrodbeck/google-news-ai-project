@@ -27,6 +27,21 @@ function chooseImage(a: ArticleRecord): string | undefined {
   return a.fullResImage || a.imageUrl || undefined;
 }
 
+/** Leading image-gallery nav harvested into the excerpt, e.g. "Previous Image 1/3 Next Image ". */
+const GALLERY_NAV_PREFIX =
+  /^\s*(?:Previous Image|Next Image|\d+\s*\/\s*\d+)(?:\s+(?:Previous Image|Next Image|\d+\s*\/\s*\d+))*\s*/i;
+
+/**
+ * `RSS Description` is the WordPress excerpt (via Airtable), so like the photo
+ * caption it arrives with raw HTML entities (`&#8220;`, `&hellip;`) that would
+ * be escaped a second time — and, on gallery-led posts, with the gallery's nav
+ * text scraped in alongside it. Decode entities and drop that nav prefix.
+ */
+function cleanDescription(s: string | undefined): string {
+  if (!s) return "";
+  return decodeEntitiesText(s).replace(GALLERY_NAV_PREFIX, "").replace(/\s+/g, " ").trim();
+}
+
 /** content:encoded body with fallback chain: HTML -> plain -> rss description. */
 function contentHtml(a: ArticleRecord): string {
   const cleaned = sanitizeArticleHtml(a.articleHtml);
@@ -39,7 +54,8 @@ function contentHtml(a: ArticleRecord): string {
       .map((p) => `<p>${xmlEscape(p)}</p>`)
       .join("\n");
   }
-  if (a.rssDescription) return `<p>${xmlEscape(a.rssDescription)}</p>`;
+  const desc = cleanDescription(a.rssDescription);
+  if (desc) return `<p>${xmlEscape(desc)}</p>`;
   return "";
 }
 
@@ -80,7 +96,8 @@ export function renderItem(a: ArticleRecord, opts: RenderOpts): string {
     `      <guid>${a.link}</guid>`,
     `      <pubDate>${toRFC822(a.publicationTime)}</pubDate>`,
   ];
-  if (a.rssDescription) lines.push(`      <description>${xmlEscape(a.rssDescription)}</description>`);
+  const description = cleanDescription(a.rssDescription);
+  if (description) lines.push(`      <description>${xmlEscape(description)}</description>`);
   if (a.author) lines.push(`      <dcterms:creator>${xmlEscape(a.author)}</dcterms:creator>`);
   if (a.lastUpdated) lines.push(`      <dcterms:modified>${toISO8601Offset(a.lastUpdated)}</dcterms:modified>`);
   const genre = deriveGenre(a.category);

@@ -76,6 +76,9 @@ const captioned: ArticleRecord = {
   publicationTime: "2026-06-26T14:00:18.000Z",
   lastUpdated: "2026-06-26T14:10:58.000Z",
   category: "News,Northfax,Parks",
+  // REAL shape of a polluted excerpt: gallery nav scraped in + raw HTML entities
+  rssDescription:
+    "Previous Image 1/2 Next Image County Board candidates say &#8220;I would love to see a [new] library&#8221; on Columbia [&hellip;]",
   fullResImage: "https://www.ffxnow.com/files/2026/06/Screenshot-2026-06-26-095753.jpg",
   imageUrl: "https://lnnhub.s3.us-east-1.amazonaws.com/img/ffxnow-42424.jpg",
   // caption carries raw-HTML entities, exactly like the Airtable formula returns them
@@ -261,6 +264,18 @@ check("live: media:title emitted only when a caption exists", () => {
   assert.ok(live.includes("<media:title>A mock-up of what stormwater"), "caption missing");
   // poll record has an image but no caption -> self-closing media:content, no media:title for it
   assert.ok(live.includes('medium="image"/>'), "expected a caption-less self-closing media:content");
+});
+check("description decodes entities and strips scraped gallery nav", () => {
+  const it = liveItems.find((i) => String(i.link).includes("/planning-underway-for-new-linear-park"));
+  const d = String(it?.description ?? "");
+  assert.ok(!/^Previous Image|Next Image|\d+\/\d+/.test(d), `gallery nav survived: ${d.slice(0, 40)}`);
+  assert.ok(d.startsWith("County Board candidates say"), `unexpected start: ${d.slice(0, 40)}`);
+  assert.ok(d.includes("“I would love to see a [new] library”"), "curly quotes not decoded");
+  assert.ok(d.includes("[…]"), "hellip not decoded");
+});
+check("no double-escaped entities (&amp;#) anywhere in either feed", () => {
+  assert.ok(!/&amp;#/.test(live), "double-escaped entity in live feed");
+  assert.ok(!/&amp;#/.test(archive), "double-escaped entity in archive feed");
 });
 check("media:title decodes HTML entities from the raw-HTML caption (no double-escaping)", () => {
   // &#8217; -> ’ (literal), &amp; -> & then single-escaped back to &amp;

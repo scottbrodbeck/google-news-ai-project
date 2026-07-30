@@ -27,6 +27,7 @@ All field IDs live in `src/lib/config.ts`, including `FIELD_IDS.deleteFromFeed =
 - `Full Res Image` + `Image URL` are **`url`** fields → plain strings (not attachments), so `airtable.ts`'s `str()` mapper is correct as-is.
 - `Site` is a **`singleSelect`**; the raw REST API returns the option **name** as a string ("ARLnow"), which is what `{Site}='ARLnow'` in `filterByFormula` and `SITES_IN_SCOPE` expect.
 - `Photo caption` + `Unique ID` are **formula** fields (string results); empty caption is omitted from the response → `media:title` dropped automatically. The caption is regex-extracted from raw article HTML, so it carries HTML entities (`&#8217;`, `&amp;`) — `render` runs it through `decodeEntitiesText` before XML-escaping so `media:title` isn't double-escaped.
+- `RSS Description` is the WordPress **excerpt**, so it has the same two problems and gets the same treatment in `render`'s `cleanDescription()`: raw HTML entities (`&#8220;`, `&hellip;`) are decoded before XML-escaping (else readers see a literal `&#8220;`), and gallery-led posts have the slider nav scraped into the excerpt (`"Previous Image 1/3 Next Image …"`) which is stripped as a prefix. Verified against the live feed 2026-07-30 (39 double-escaped + 3 nav-polluted descriptions).
 - `Last Updated` is a **`lastModifiedTime`** field (good — spec §9.2 ideal) watching Headline, Article, Link, Category, Image URL, Author. **It does NOT watch `Delete from Google Feed`** — see the tombstone caveat below.
 - `Publication time`/`Last Updated` come back as UTC ISO (`...Z`) regardless of display TZ.
 
