@@ -449,6 +449,7 @@ const wpPost: WpPost = {
         { name: "New Restaurant", taxonomy: "category" },
       ],
       [{ name: "Old Town", taxonomy: "post_tag" }],
+      [{ name: "Emily Leayman", taxonomy: "author" }], // PublishPress author term — plugin includes it
       [{ name: "some-other-taxonomy-term", taxonomy: "ppma_author" }], // must NOT appear
     ],
   },
@@ -468,7 +469,7 @@ check("toWebhookPayload decodes Headline; keeps Article as raw HTML; Time is sit
 });
 check("toWebhookPayload: Categories = categories + tags (plugin parity), other taxonomies excluded", () => {
   const p = toWebhookPayload(wpPost);
-  assert.equal(p.Categories, "Around Town, New Restaurant, Old Town");
+  assert.equal(p.Categories, "Around Town, New Restaurant, Old Town, Emily Leayman");
   assert.ok(!p.Categories.includes("ppma"), "non-category/tag taxonomy leaked");
 });
 check("toWebhookPayload: Image prefers full size; Excerpt decoded + stripped", () => {

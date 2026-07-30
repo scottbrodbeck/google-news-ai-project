@@ -66,13 +66,13 @@ function featuredImage(post: WpPost): string {
 /**
  * Categories + tags, ", "-joined — matching what the WordPress plugin sends.
  * Verified against a real plugin payload: "News, Alexandria Jail, nonprofit,
- * Sheriff's Office, …, James Cullum" is one category plus six tags (LNN tags
- * posts with the author's name too). Categories come first because WordPress
- * returns the `category` term group before `post_tag`. Downstream this feeds
- * Airtable's `Category`, which drives `licensed_news:genre`, so dropping tags
- * would silently change genre matching.
+ * Sheriff's Office, …, James Cullum" = 1 `category` + 5 `post_tag` + the
+ * PublishPress `author` term. WordPress returns the groups in that order, which
+ * is the order the plugin emits. Downstream this feeds Airtable's `Category`,
+ * which drives `licensed_news:genre`, so dropping any of them would silently
+ * change genre matching. Other taxonomies (e.g. `ppma_author`) are excluded.
  */
-const PAYLOAD_TAXONOMIES = new Set(["category", "post_tag"]);
+const PAYLOAD_TAXONOMIES = new Set(["category", "post_tag", "author"]);
 
 function categoryNames(post: WpPost): string {
   const names: string[] = [];
