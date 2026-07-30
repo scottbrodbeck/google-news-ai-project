@@ -167,7 +167,7 @@ const empty: ArticleRecord = {
 const fixtures = [poll, captioned, noImage, tombstone, special, plainOnly, gallery, empty];
 const meta: FeedMeta = {
   title: "Local News Now",
-  link: "https://feeds.lnn.co/gn/TOKEN.xml",
+  link: "https://lnn.co", // publisher homepage, per RSS 2.0 — not the feed's own URL
   description: "Licensed news content from ARLnow, ALXnow and FFXnow.",
   imageUrl: "https://www.arlnow.com/wp-content/uploads/2021/04/cropped-arl-only-square-blue.png",
 };
@@ -214,6 +214,11 @@ check("channel <image> has url/title/link, and title+link mirror the channel", (
   assert.equal(ch.image.url, meta.imageUrl);
   assert.equal(ch.image.title, ch.title, "image title must match channel title");
   assert.equal(ch.image.link, ch.link, "image link must match channel link");
+});
+check("channel <link> is the publisher site — not the feed URL, and leaks no feed token", () => {
+  const ch = parser.parse(live).rss.channel;
+  assert.ok(!String(ch.link).includes("/gn/"), "channel link points at the feed itself");
+  assert.ok(!/\.xml(\?|$)/.test(String(ch.link)), "channel link points at a feed file");
 });
 check("<image> is omitted when no logo is configured", () => {
   const noLogo = buildFeed([noImage], { ...meta, imageUrl: undefined }, { includeImages: true, emitTombstones: true });

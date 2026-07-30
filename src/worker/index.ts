@@ -12,6 +12,7 @@ export interface Env {
   CHANNEL_TITLE: string;
   CHANNEL_DESCRIPTION: string;
   CHANNEL_IMAGE_URL?: string; // publisher logo for the channel-level <image> (Google branding)
+  CHANNEL_LINK?: string; // publisher homepage for the channel <link>
   WINDOW_DAYS: string;
   TOMBSTONE_DAYS: string;
 }
@@ -39,8 +40,14 @@ function liveFormula(windowDays: number, tombDays: number): string {
   );
 }
 
-function feedUrl(env: Env): string {
-  return `https://feeds.lnn.co/gn/${env.FEED_PATH_TOKEN}.xml`;
+/**
+ * Channel <link>: per RSS 2.0 this is the website the channel corresponds to —
+ * the publisher's homepage, not the feed's own address. (The archive already
+ * does this, using each publication's site.) Keeping the feed URL here would
+ * also echo FEED_PATH_TOKEN into the feed body.
+ */
+function channelLink(env: Env): string {
+  return env.CHANNEL_LINK || "https://lnn.co";
 }
 
 async function buildLive(env: Env): Promise<{ xml: string; count: number; bytes: number }> {
@@ -56,7 +63,7 @@ async function buildLive(env: Env): Promise<{ xml: string; count: number; bytes:
     articles,
     {
       title: env.CHANNEL_TITLE,
-      link: feedUrl(env),
+      link: channelLink(env),
       description: env.CHANNEL_DESCRIPTION,
       imageUrl: env.CHANNEL_IMAGE_URL || undefined,
     },

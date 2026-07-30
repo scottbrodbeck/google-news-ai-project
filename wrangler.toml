@@ -17,6 +17,8 @@ bucket_name = "google-news-feed"
 # Static channel metadata
 CHANNEL_TITLE = "Local News Now"
 CHANNEL_DESCRIPTION = "Licensed news content from ARLnow, ALXnow and FFXnow."
+# Channel <link> — the publisher's website (RSS 2.0), NOT the feed's own URL.
+CHANNEL_LINK = "https://lnn.co"
 # Publisher logo for the channel-level <image> (Google's branding request). Served
 # by this Worker from the bundled assets/lnn-logo.png. Update if the feed moves to
 # a custom domain, or point elsewhere to swap the logo.
