@@ -33,6 +33,18 @@ export const FIELD_NAMES = {
 export const SITES_IN_SCOPE: readonly SiteName[] = ["ARLnow", "ALXnow", "FFXnow"];
 
 /**
+ * Publisher logos for the channel-level <image> (Google's branding request).
+ * These are each site's WordPress site icon at full resolution (512x512 PNG) —
+ * the `site_icon_url` from `/wp-json/`, i.e. the uncropped original rather than
+ * a -32x32/-180x180 derivative. Used per-file by the archive.
+ */
+export const SITE_LOGO: Record<SiteName, string> = {
+  ARLnow: "https://www.arlnow.com/wp-content/uploads/2021/04/cropped-arl-only-square-blue.png",
+  ALXnow: "https://www.alxnow.com/files/2022/01/cropped-new-alxnow-logo-square-alx-only2.png",
+  FFXnow: "https://www.ffxnow.com/files/2021/07/cropped-ffxnow-site-logo-square.png",
+};
+
+/**
  * licensed_news:genre derivation from the free-text Category field.
  * First match wins; if nothing matches, the element is omitted.
  * Allowed Google values: PressRelease, Satire, Blog, OpEd, Opinion, Other.

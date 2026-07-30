@@ -125,9 +125,24 @@ export interface FeedMeta {
   title: string;
   link: string;
   description: string;
+  /**
+   * Publisher logo/favicon for the channel-level <image> (Google asked for a
+   * high-res one for branding). Standard RSS 2.0 — no new namespace. Omitted
+   * when unset. Per spec the image's title/link mirror the channel's, so we
+   * derive them here rather than let them drift.
+   */
+  imageUrl?: string;
 }
 
 function head(meta: FeedMeta, lastBuild: string): string {
+  const image = meta.imageUrl
+    ? `
+    <image>
+      <url>${xmlEscape(meta.imageUrl)}</url>
+      <title>${xmlEscape(meta.title)}</title>
+      <link>${xmlEscape(meta.link)}</link>
+    </image>`
+    : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <rss xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:licensed_news="https://www.google.com/schemas/rss-licensed-news/" xmlns:media="http://search.yahoo.com/mrss/" version="2.0">
   <channel>
@@ -135,7 +150,7 @@ function head(meta: FeedMeta, lastBuild: string): string {
     <link>${xmlEscape(meta.link)}</link>
     <description>${xmlEscape(meta.description)}</description>
     <language>en</language>
-    <lastBuildDate>${lastBuild}</lastBuildDate>`;
+    <lastBuildDate>${lastBuild}</lastBuildDate>${image}`;
 }
 
 const TAIL = `  </channel>

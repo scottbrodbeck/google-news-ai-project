@@ -17,7 +17,7 @@ import { XMLValidator, XMLParser } from "fast-xml-parser";
 
 import { buildFeed, type FeedMeta } from "../src/lib/render";
 import { mapRow } from "../src/lib/airtable";
-import { FIELD_IDS } from "../src/lib/config";
+import { FIELD_IDS, SITE_LOGO } from "../src/lib/config";
 import { toRFC822, toISO8601Offset, easternDayKey, quarterOfDay } from "../src/lib/dates";
 import type { ArticleRecord } from "../src/lib/types";
 
@@ -169,6 +169,7 @@ const meta: FeedMeta = {
   title: "Local News Now",
   link: "https://feeds.lnn.co/gn/TOKEN.xml",
   description: "Licensed news content from ARLnow, ALXnow and FFXnow.",
+  imageUrl: "https://www.arlnow.com/wp-content/uploads/2021/04/cropped-arl-only-square-blue.png",
 };
 
 const live = buildFeed(fixtures, meta, { includeImages: true, emitTombstones: true });
@@ -203,6 +204,26 @@ check("declares content/dcterms/licensed_news/media namespaces", () => {
 check("does NOT declare or use atom: or dc:", () => {
   assert.ok(!/xmlns:atom|<atom:/.test(live), "atom present");
   assert.ok(!/xmlns:dc=|<dc:/.test(live), "dc present");
+});
+
+// ---- channel <image> (Google branding request) ------------------------------
+console.log("\nChannel image");
+check("channel <image> has url/title/link, and title+link mirror the channel", () => {
+  const ch = parser.parse(live).rss.channel;
+  assert.ok(ch.image, "no <image> block");
+  assert.equal(ch.image.url, meta.imageUrl);
+  assert.equal(ch.image.title, ch.title, "image title must match channel title");
+  assert.equal(ch.image.link, ch.link, "image link must match channel link");
+});
+check("<image> is omitted when no logo is configured", () => {
+  const noLogo = buildFeed([noImage], { ...meta, imageUrl: undefined }, { includeImages: true, emitTombstones: true });
+  assert.ok(!noLogo.includes("<image>"), "emitted an empty <image>");
+  assert.equal(XMLValidator.validate(noLogo), true);
+});
+check("archive files carry their own publication's logo", () => {
+  const arch = buildFeed([noImage], { ...meta, title: "FFXnow", imageUrl: SITE_LOGO.FFXnow }, { includeImages: false, emitTombstones: false });
+  assert.ok(arch.includes(`<url>${SITE_LOGO.FFXnow}</url>`), "site logo missing");
+  assert.ok(!/<media:/.test(arch), "archive must still have no media:*");
 });
 
 // ---- item selection ---------------------------------------------------------
