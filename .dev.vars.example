@@ -20,8 +20,9 @@ R2_ACCOUNT_ID=your_cloudflare_account_id
 R2_ACCESS_KEY_ID=xxx
 R2_SECRET_ACCESS_KEY=xxx
 R2_BUCKET=google-news-feed
-# Public base URL of the deployed Worker — used to build the archive download link (/archive/<FEED_SECRET>/...)
-PUBLIC_BASE_URL=https://feeds.lnn.co
+# Public base URL of the deployed Worker — used to build the archive download link (/archive/<FEED_SECRET>/...).
+# Must be a domain that actually serves this Worker, or the download links will be dead.
+PUBLIC_BASE_URL=https://google-news-feed.local-news-now-group.workers.dev
 
 # Publish poller (WordPress REST -> same Zapier webhook). In prod set INGEST_WEBHOOK_URL
 # with `wrangler secret put`. Keep WP_POLL_ENABLED=false until cutover; WP_DRY_RUN=true

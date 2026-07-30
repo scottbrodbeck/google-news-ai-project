@@ -17,7 +17,7 @@ import { XMLValidator, XMLParser } from "fast-xml-parser";
 
 import { buildFeed, type FeedMeta } from "../src/lib/render";
 import { mapRow } from "../src/lib/airtable";
-import { FIELD_IDS } from "../src/lib/config";
+import { FIELD_IDS, SITE_LOGO } from "../src/lib/config";
 import { toRFC822, toISO8601Offset, easternDayKey, quarterOfDay } from "../src/lib/dates";
 import type { ArticleRecord } from "../src/lib/types";
 import { toWebhookPayload, selectNewPosts, type WpPost } from "../src/lib/wordpress";
@@ -77,6 +77,9 @@ const captioned: ArticleRecord = {
   publicationTime: "2026-06-26T14:00:18.000Z",
   lastUpdated: "2026-06-26T14:10:58.000Z",
   category: "News,Northfax,Parks",
+  // REAL shape of a polluted excerpt: gallery nav scraped in + raw HTML entities
+  rssDescription:
+    "Previous Image 1/2 Next Image County Board candidates say &#8220;I would love to see a [new] library&#8221; on Columbia [&hellip;]",
   fullResImage: "https://www.ffxnow.com/files/2026/06/Screenshot-2026-06-26-095753.jpg",
   imageUrl: "https://lnnhub.s3.us-east-1.amazonaws.com/img/ffxnow-42424.jpg",
   // caption carries raw-HTML entities, exactly like the Airtable formula returns them
@@ -165,8 +168,9 @@ const empty: ArticleRecord = {
 const fixtures = [poll, captioned, noImage, tombstone, special, plainOnly, gallery, empty];
 const meta: FeedMeta = {
   title: "Local News Now",
-  link: "https://feeds.lnn.co/gn/TOKEN.xml",
+  link: "https://lnn.co", // publisher homepage, per RSS 2.0 — not the feed's own URL
   description: "Licensed news content from ARLnow, ALXnow and FFXnow.",
+  imageUrl: "https://www.arlnow.com/wp-content/uploads/2021/04/cropped-arl-only-square-blue.png",
 };
 
 const live = buildFeed(fixtures, meta, { includeImages: true, emitTombstones: true });
@@ -201,6 +205,31 @@ check("declares content/dcterms/licensed_news/media namespaces", () => {
 check("does NOT declare or use atom: or dc:", () => {
   assert.ok(!/xmlns:atom|<atom:/.test(live), "atom present");
   assert.ok(!/xmlns:dc=|<dc:/.test(live), "dc present");
+});
+
+// ---- channel <image> (Google branding request) ------------------------------
+console.log("\nChannel image");
+check("channel <image> has url/title/link, and title+link mirror the channel", () => {
+  const ch = parser.parse(live).rss.channel;
+  assert.ok(ch.image, "no <image> block");
+  assert.equal(ch.image.url, meta.imageUrl);
+  assert.equal(ch.image.title, ch.title, "image title must match channel title");
+  assert.equal(ch.image.link, ch.link, "image link must match channel link");
+});
+check("channel <link> is the publisher site — not the feed URL, and leaks no feed token", () => {
+  const ch = parser.parse(live).rss.channel;
+  assert.ok(!String(ch.link).includes("/gn/"), "channel link points at the feed itself");
+  assert.ok(!/\.xml(\?|$)/.test(String(ch.link)), "channel link points at a feed file");
+});
+check("<image> is omitted when no logo is configured", () => {
+  const noLogo = buildFeed([noImage], { ...meta, imageUrl: undefined }, { includeImages: true, emitTombstones: true });
+  assert.ok(!noLogo.includes("<image>"), "emitted an empty <image>");
+  assert.equal(XMLValidator.validate(noLogo), true);
+});
+check("archive files carry their own publication's logo", () => {
+  const arch = buildFeed([noImage], { ...meta, title: "FFXnow", imageUrl: SITE_LOGO.FFXnow }, { includeImages: false, emitTombstones: false });
+  assert.ok(arch.includes(`<url>${SITE_LOGO.FFXnow}</url>`), "site logo missing");
+  assert.ok(!/<media:/.test(arch), "archive must still have no media:*");
 });
 
 // ---- item selection ---------------------------------------------------------
@@ -262,6 +291,18 @@ check("live: media:title emitted only when a caption exists", () => {
   assert.ok(live.includes("<media:title>A mock-up of what stormwater"), "caption missing");
   // poll record has an image but no caption -> self-closing media:content, no media:title for it
   assert.ok(live.includes('medium="image"/>'), "expected a caption-less self-closing media:content");
+});
+check("description decodes entities and strips scraped gallery nav", () => {
+  const it = liveItems.find((i) => String(i.link).includes("/planning-underway-for-new-linear-park"));
+  const d = String(it?.description ?? "");
+  assert.ok(!/^Previous Image|Next Image|\d+\/\d+/.test(d), `gallery nav survived: ${d.slice(0, 40)}`);
+  assert.ok(d.startsWith("County Board candidates say"), `unexpected start: ${d.slice(0, 40)}`);
+  assert.ok(d.includes("“I would love to see a [new] library”"), "curly quotes not decoded");
+  assert.ok(d.includes("[…]"), "hellip not decoded");
+});
+check("no double-escaped entities (&amp;#) anywhere in either feed", () => {
+  assert.ok(!/&amp;#/.test(live), "double-escaped entity in live feed");
+  assert.ok(!/&amp;#/.test(archive), "double-escaped entity in archive feed");
 });
 check("media:title decodes HTML entities from the raw-HTML caption (no double-escaping)", () => {
   // &#8217; -> ’ (literal), &amp; -> & then single-escaped back to &amp;
@@ -407,7 +448,8 @@ const wpPost: WpPost = {
         { name: "Around Town", taxonomy: "category" },
         { name: "New Restaurant", taxonomy: "category" },
       ],
-      [{ name: "old-town", taxonomy: "post_tag" }],
+      [{ name: "Old Town", taxonomy: "post_tag" }],
+      [{ name: "some-other-taxonomy-term", taxonomy: "ppma_author" }], // must NOT appear
     ],
   },
 };
@@ -424,9 +466,13 @@ check("toWebhookPayload decodes Headline; keeps Article as raw HTML; Time is sit
   assert.equal(p.URL, wpPost.link);
   assert.equal(p.Author, "Emily Leayman, Jane Roe"); // array byline joined
 });
-check("toWebhookPayload: Categories excludes tags; Image prefers full size; Excerpt decoded + stripped", () => {
+check("toWebhookPayload: Categories = categories + tags (plugin parity), other taxonomies excluded", () => {
   const p = toWebhookPayload(wpPost);
-  assert.equal(p.Categories, "Around Town,New Restaurant");
+  assert.equal(p.Categories, "Around Town, New Restaurant, Old Town");
+  assert.ok(!p.Categories.includes("ppma"), "non-category/tag taxonomy leaked");
+});
+check("toWebhookPayload: Image prefers full size; Excerpt decoded + stripped", () => {
+  const p = toWebhookPayload(wpPost);
   assert.equal(p.Image, "https://www.alxnow.com/files/2026/06/finn-and-fire-2.jpg");
   assert.equal(p.Excerpt, "An upscale Peruvian & Japanese fusion spot opened…");
 });

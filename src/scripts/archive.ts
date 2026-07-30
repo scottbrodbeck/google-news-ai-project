@@ -15,7 +15,7 @@ import { AwsClient } from "aws4fetch";
 
 import { fetchArticles } from "../lib/airtable";
 import { buildFeed } from "../lib/render";
-import { FIELD_NAMES, SITES_IN_SCOPE } from "../lib/config";
+import { FIELD_NAMES, SITES_IN_SCOPE, SITE_LOGO } from "../lib/config";
 import { easternDayKey, easternYear, lastCompletedQuarter, parseQuarter, quarterOfDay, type Quarter } from "../lib/dates";
 import { sendSlack, sendEmail } from "../lib/notify";
 import type { ArticleRecord } from "../lib/types";
@@ -99,6 +99,7 @@ function buildFiles(groups: DayGroup[]): Record<string, Uint8Array> {
         title: `${g.site}`,
         link: `https://www.${g.site.toLowerCase()}.com/`,
         description: `${g.site} — archival feed for ${g.day}`,
+        imageUrl: SITE_LOGO[g.site as keyof typeof SITE_LOGO], // that publication's own logo
       },
       { includeImages: false, emitTombstones: false } // archival: no multimedia; retracted articles omitted entirely
     );

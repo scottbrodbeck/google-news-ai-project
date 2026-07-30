@@ -63,15 +63,25 @@ function featuredImage(post: WpPost): string {
   return media.media_details?.sizes?.full?.source_url || media.source_url || "";
 }
 
-/** Comma-joined category names only (excludes tags), entities decoded. */
+/**
+ * Categories + tags, ", "-joined — matching what the WordPress plugin sends.
+ * Verified against a real plugin payload: "News, Alexandria Jail, nonprofit,
+ * Sheriff's Office, …, James Cullum" is one category plus six tags (LNN tags
+ * posts with the author's name too). Categories come first because WordPress
+ * returns the `category` term group before `post_tag`. Downstream this feeds
+ * Airtable's `Category`, which drives `licensed_news:genre`, so dropping tags
+ * would silently change genre matching.
+ */
+const PAYLOAD_TAXONOMIES = new Set(["category", "post_tag"]);
+
 function categoryNames(post: WpPost): string {
   const names: string[] = [];
   for (const group of post._embedded?.["wp:term"] ?? []) {
     for (const term of group) {
-      if (term?.taxonomy === "category" && term.name) names.push(decodeEntitiesText(term.name));
+      if (term?.name && PAYLOAD_TAXONOMIES.has(term.taxonomy ?? "")) names.push(decodeEntitiesText(term.name));
     }
   }
-  return names.join(",");
+  return names.join(", "); // ", " matches the plugin payload exactly
 }
 
 /** Byline as a string. `author_names` is an array in our WP (PublishPress); fall back to core author. */

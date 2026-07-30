@@ -3,6 +3,7 @@ import { buildFeed } from "../lib/render";
 import { FIELD_IDS, FIELD_NAMES, SITES_IN_SCOPE, SITE_WP_BASE, WP_SEEN_CAP } from "../lib/config";
 import { fetchRecentPosts, selectNewPosts, toWebhookPayload, type WpPost } from "../lib/wordpress";
 import type { SiteName } from "../lib/types";
+import { LOGO_PNG } from "./logo";
 
 /** Worker bindings + vars + secrets. */
 export interface Env {
@@ -12,6 +13,8 @@ export interface Env {
   FEED_SECRET: string;
   CHANNEL_TITLE: string;
   CHANNEL_DESCRIPTION: string;
+  CHANNEL_IMAGE_URL?: string; // publisher logo for the channel-level <image> (Google branding)
+  CHANNEL_LINK?: string; // publisher homepage for the channel <link>
   WINDOW_DAYS: string;
   TOMBSTONE_DAYS: string;
   // Publish poller (WordPress REST -> same Zapier webhook). INGEST_WEBHOOK_URL is a secret.
@@ -43,8 +46,14 @@ function liveFormula(windowDays: number, tombDays: number): string {
   );
 }
 
-function feedUrl(env: Env): string {
-  return `https://feeds.lnn.co/gn/${env.FEED_PATH_TOKEN}.xml`;
+/**
+ * Channel <link>: per RSS 2.0 this is the website the channel corresponds to —
+ * the publisher's homepage, not the feed's own address. (The archive already
+ * does this, using each publication's site.) Keeping the feed URL here would
+ * also echo FEED_PATH_TOKEN into the feed body.
+ */
+function channelLink(env: Env): string {
+  return env.CHANNEL_LINK || "https://lnn.co";
 }
 
 async function buildLive(env: Env): Promise<{ xml: string; count: number; bytes: number }> {
@@ -58,7 +67,12 @@ async function buildLive(env: Env): Promise<{ xml: string; count: number; bytes:
   });
   const xml = buildFeed(
     articles,
-    { title: env.CHANNEL_TITLE, link: feedUrl(env), description: env.CHANNEL_DESCRIPTION },
+    {
+      title: env.CHANNEL_TITLE,
+      link: channelLink(env),
+      description: env.CHANNEL_DESCRIPTION,
+      imageUrl: env.CHANNEL_IMAGE_URL || undefined,
+    },
     { includeImages: true, emitTombstones: true }
   );
   const bytes = new TextEncoder().encode(xml).length;
@@ -185,10 +199,23 @@ export default {
     const url = new URL(req.url);
     const path = url.pathname;
 
-    // Keep the private feed host out of search indexes (nothing here should be crawled).
+    // Keep the private feed host out of search indexes. `/logo.png` is explicitly
+    // allowed — it's the channel <image> Google must be able to fetch, and a blanket
+    // Disallow would block it (Google honours the most-specific rule).
     if (path === "/robots.txt") {
-      return new Response("User-agent: *\nDisallow: /\n", {
+      return new Response("User-agent: *\nDisallow: /\nAllow: /logo.png\n", {
         headers: { "Content-Type": "text/plain; charset=utf-8" },
+      });
+    }
+
+    // Publisher logo for the channel-level <image>. Public on purpose (no key):
+    // Google fetches it directly, and it reveals nothing but the brand mark.
+    if (path === "/logo.png") {
+      return new Response(LOGO_PNG, {
+        headers: {
+          "Content-Type": "image/png",
+          "Cache-Control": "public, max-age=86400",
+        },
       });
     }
 

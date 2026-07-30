@@ -51,7 +51,8 @@ npm run dev        # local
 npm run deploy     # production
 ```
 - Create the R2 bucket first: `wrangler r2 bucket create google-news-feed`
-- URL: `https://feeds.lnn.co/gn/<FEED_PATH_TOKEN>.xml?key=<FEED_SECRET>` (or the `*.workers.dev` URL until the custom domain is added).
+- URL: `https://google-news-feed.local-news-now-group.workers.dev/gn/<FEED_PATH_TOKEN>.xml?key=<FEED_SECRET>` (`feeds.lnn.co` is *not* set up — see the commented custom-domain block in `wrangler.toml` if you ever want it).
+- The channel `<link>` is the publisher site (`CHANNEL_LINK`, `https://lnn.co`), per RSS 2.0 — not the feed's own URL.
 - Submit that full URL (with `?key=`) to Google via the Contact Us form as a query-string API-key feed.
 
 ## Quarterly archive (cloud — GitHub Actions)

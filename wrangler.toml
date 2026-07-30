@@ -17,6 +17,13 @@ bucket_name = "google-news-feed"
 # Static channel metadata
 CHANNEL_TITLE = "Local News Now"
 CHANNEL_DESCRIPTION = "Licensed news content from ARLnow, ALXnow and FFXnow."
+# Channel <link> — the publisher's website (RSS 2.0), NOT the feed's own URL.
+CHANNEL_LINK = "https://lnn.co"
+# Publisher logo for the channel-level <image> (Google's branding request). Served
+# by this Worker from the bundled assets/lnn-logo.png, cached hard at the edge —
+# so the ?v= is a cache-buster: BUMP IT whenever assets/lnn-logo.png changes, or
+# consumers keep the previous image for up to max-age (24h).
+CHANNEL_IMAGE_URL = "https://google-news-feed.local-news-now-group.workers.dev/logo.png?v=512"
 # Rolling window for the live feed (days). 3 comfortably covers Google's "last 2 days".
 WINDOW_DAYS = "3"
 # How long a checked "Delete from Google Feed" record keeps emitting a tombstone (days).
