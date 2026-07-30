@@ -20,7 +20,7 @@ import { mapRow } from "../src/lib/airtable";
 import { FIELD_IDS, SITE_LOGO } from "../src/lib/config";
 import { toRFC822, toISO8601Offset, easternDayKey, quarterOfDay } from "../src/lib/dates";
 import type { ArticleRecord } from "../src/lib/types";
-import { toWebhookPayload, selectNewPosts, type WpPost } from "../src/lib/wordpress";
+import { toWebhookPayload, selectNewPosts, toPluginTime, type WpPost } from "../src/lib/wordpress";
 
 // ---- tiny test runner -------------------------------------------------------
 let passed = 0;
@@ -459,13 +459,23 @@ check("toWebhookPayload emits exactly the 8 plugin keys", () =>
     "Article", "Author", "Categories", "Excerpt", "Headline", "Image", "Time", "URL",
   ])
 );
-check("toWebhookPayload decodes Headline; keeps Article as raw HTML; Time is site-local", () => {
+check("toWebhookPayload decodes Headline; keeps Article as raw HTML; Time is plugin format", () => {
   const p = toWebhookPayload(wpPost);
   assert.equal(p.Headline, "Finn & Fire brings Peruvian Nikkei cuisine to Old Town");
   assert.equal(p.Article, "<p>Finn &amp; Fire began its soft opening.</p>");
-  assert.equal(p.Time, "2026-06-26T12:30:00");
+  assert.equal(p.Time, "June 26, 2026 12:30 pm");
   assert.equal(p.URL, wpPost.link);
   assert.equal(p.Author, "Emily Leayman, Jane Roe"); // array byline joined
+});
+check("Headline uses ASCII quotes like the plugin (not WP's typographic ones)", () => {
+  const p = toWebhookPayload({ ...wpPost, title: { rendered: "&#8216;I&#8217;m recreating myself&#8217;: a &#8220;story&#8221;" } });
+  assert.equal(p.Headline, `'I'm recreating myself': a "story"`);
+});
+check("toPluginTime matches the plugin's format across am/pm and midnight/noon", () => {
+  assert.equal(toPluginTime("2025-04-16T14:45:25"), "April 16, 2025 2:45 pm");
+  assert.equal(toPluginTime("2025-04-16T09:05:00"), "April 16, 2025 9:05 am");
+  assert.equal(toPluginTime("2025-01-01T00:00:00"), "January 1, 2025 12:00 am");
+  assert.equal(toPluginTime("2025-12-31T12:00:00"), "December 31, 2025 12:00 pm");
 });
 check("toWebhookPayload: Categories = categories + tags (plugin parity), other taxonomies excluded", () => {
   const p = toWebhookPayload(wpPost);

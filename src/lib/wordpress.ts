@@ -84,6 +84,38 @@ function categoryNames(post: WpPost): string {
   return names.join(", "); // ", " matches the plugin payload exactly
 }
 
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/**
+ * Plugin parity for `Time`: "April 16, 2025 2:48 pm".
+ *
+ * WP's `date` is already site-local (Eastern) wall-clock with no offset, so we
+ * reformat its components literally. Deliberately NOT via `new Date(...)`: that
+ * parses an offset-less string as UTC in the Worker, which would shift the hour
+ * by 4-5 before formatting. The Zap re-parses this as US/Eastern.
+ */
+export function toPluginTime(wpDate: string | undefined): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(wpDate ?? "");
+  if (!m) return wpDate ?? "";
+  const [, y, mo, d, hh, mi] = m;
+  const h24 = Number(hh);
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${MONTHS[Number(mo) - 1]} ${Number(d)}, ${y} ${h12}:${mi} ${h24 < 12 ? "am" : "pm"}`;
+}
+
+/**
+ * Plugin parity for `Headline`: the plugin emits ASCII quotes where WordPress
+ * stores typographic ones (WP "'I'm recreating myself'" -> "'I'm recreating
+ * myself'"). Only quotes/apostrophes — we have no evidence it touches dashes
+ * or ellipses, so those are left alone.
+ */
+function toStraightQuotes(s: string): string {
+  return s.replace(/[‘’‚‛]/g, "'").replace(/[“”„‟]/g, '"');
+}
+
 /** Byline as a string. `author_names` is an array in our WP (PublishPress); fall back to core author. */
 function authorByline(post: WpPost): string {
   const a = post.author_names;
@@ -96,8 +128,8 @@ function authorByline(post: WpPost): string {
 export function toWebhookPayload(post: WpPost): WebhookPayload {
   return {
     URL: post.link ?? "",
-    Headline: decodeEntitiesText(post.title?.rendered ?? ""),
-    Time: post.date ?? "", // site-local (Eastern); the Zap reformats treating input as US/Eastern
+    Headline: toStraightQuotes(decodeEntitiesText(post.title?.rendered ?? "")),
+    Time: toPluginTime(post.date), // "April 16, 2025 2:48 pm" — the Zap parses this as US/Eastern
     Categories: categoryNames(post),
     Excerpt: decodeEntitiesText(post.excerpt?.rendered ?? "").trim(), // decode + strip tags
     Image: featuredImage(post),
