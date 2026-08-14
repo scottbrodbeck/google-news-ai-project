@@ -20,7 +20,9 @@ import { mapRow } from "../src/lib/airtable";
 import { FIELD_IDS, SITE_LOGO } from "../src/lib/config";
 import { toRFC822, toISO8601Offset, easternDayKey, quarterOfDay } from "../src/lib/dates";
 import type { ArticleRecord } from "../src/lib/types";
-import { toWebhookPayload, selectNewPosts, toPluginTime, type WpPost } from "../src/lib/wordpress";
+import {
+  toWebhookPayload, selectNewPosts, toPluginTime, contentHash, selectUpdatedPosts, type WpPost,
+} from "../src/lib/wordpress";
 
 // ---- tiny test runner -------------------------------------------------------
 let passed = 0;
@@ -495,6 +497,75 @@ check("selectNewPosts returns unseen ids oldest-first; all-seen -> none", () => 
   ] as WpPost[];
   assert.deepEqual(selectNewPosts(posts, [2]).map((p) => p.id), [1, 3]);
   assert.deepEqual(selectNewPosts(posts, [1, 2, 3]).map((p) => p.id), []);
+});
+
+// ---- update poller: the loop guard -----------------------------------------
+console.log("\nUpdate poller (loop guard)");
+const NOW = Date.parse("2026-08-14T18:00:00Z");
+const upd = (over: Partial<WpPost> = {}): WpPost => ({
+  ...wpPost,
+  date_gmt: "2026-08-14T16:00:00",
+  modified_gmt: "2026-08-14T17:00:00",
+  ...over,
+});
+
+check("⚠️ summary-only change does NOT fire (breaks the Zapier write-back loop)", () => {
+  const before = upd();
+  const hashes = { [String(before.id)]: contentHash(before) };
+  // Zapier writes article_summary back into WP meta -> post_modified bumps.
+  // Nothing we send changed, so this MUST NOT fire, or we loop forever.
+  const after = { ...before, modified_gmt: "2026-08-14T17:05:00", article_summary: "AI summary text" } as WpPost;
+  const sel = selectUpdatedPosts([after], { hashes, nowMs: NOW });
+  assert.equal(sel.candidates.length, 0, "fired on a meta-only change — infinite loop risk");
+  assert.equal(sel.skippedUnchanged, 1);
+});
+check("a real content edit DOES fire", () => {
+  const before = upd();
+  const hashes = { [String(before.id)]: contentHash(before) };
+  const after = { ...before, content: { rendered: "<p>Substantively rewritten body.</p>" } };
+  assert.equal(selectUpdatedPosts([after], { hashes, nowMs: NOW }).candidates.length, 1);
+});
+check("headline / image / category edits each fire", () => {
+  const base = upd();
+  const hashes = { [String(base.id)]: contentHash(base) };
+  const variants: WpPost[] = [
+    { ...base, title: { rendered: "New headline" } },
+    { ...base, _embedded: { ...base._embedded, "wp:featuredmedia": [{ source_url: "https://x/new.jpg" }] } },
+    { ...base, _embedded: { ...base._embedded, "wp:term": [[{ name: "Breaking", taxonomy: "category" }]] } },
+  ];
+  for (const v of variants) assert.equal(selectUpdatedPosts([v], { hashes, nowMs: NOW }).candidates.length, 1);
+});
+check("no baseline hash -> fires (Zap does its own genuine-update check)", () => {
+  const sel = selectUpdatedPosts([upd()], { hashes: {}, nowMs: NOW });
+  assert.equal(sel.candidates.length, 1);
+});
+check("publish echo suppressed: a post fired as new this run can't also fire as an update", () => {
+  const p = upd();
+  const sel = selectUpdatedPosts([p], { hashes: {}, justPublished: new Set([p.id]), nowMs: NOW });
+  assert.equal(sel.candidates.length, 0);
+  assert.equal(sel.skippedJustPublished, 1);
+});
+check("posts published >60 days ago never fire (bulk-edit blast radius)", () => {
+  const old = upd({ date_gmt: "2026-05-01T10:00:00" }); // ~105 days before NOW
+  const sel = selectUpdatedPosts([old], { hashes: {}, nowMs: NOW });
+  assert.equal(sel.candidates.length, 0);
+  assert.equal(sel.skippedTooOld, 1);
+});
+check("newestModified tracks the cursor high-water mark across the batch", () => {
+  const sel = selectUpdatedPosts(
+    [upd({ id: 1, modified_gmt: "2026-08-14T17:00:00" }), upd({ id: 2, modified_gmt: "2026-08-14T17:30:00" })],
+    { hashes: {}, nowMs: NOW }
+  );
+  assert.equal(sel.newestModified, "2026-08-14T17:30:00");
+});
+check("contentHash is stable, and ignores fields we don't send", () => {
+  const p = upd();
+  assert.equal(contentHash(p), contentHash({ ...p }));
+  // modified_gmt, article_summary, acf, meta must not affect the fingerprint
+  assert.equal(
+    contentHash(p),
+    contentHash({ ...p, modified_gmt: "2030-01-01T00:00:00", article_summary: "x", acf: { y: 1 } } as WpPost)
+  );
 });
 
 // ---- summary ----------------------------------------------------------------

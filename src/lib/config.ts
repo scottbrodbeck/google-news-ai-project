@@ -44,6 +44,24 @@ export const WP_POLL_PER_PAGE = 20;
 export const WP_SEEN_CAP = 300;
 
 /**
+ * Update-poller tuning. Calibrated against a measured baseline of ~1-3 genuine
+ * edits per site per day (24h sample: ARLnow 11 modified/10 published, ALXnow
+ * 5/4, FFXnow 7/6 — i.e. modified ≈ published + ~1). The rogue WP Automator
+ * trigger ran ~10,000/day, so these ceilings sit ~20x above normal traffic and
+ * ~10x below runaway territory: a breaking-news story with a dozen-plus genuine
+ * edits passes freely, a loop trips the breaker fast.
+ */
+export const WP_UPDATE_PER_PAGE = 100; // WP max; `modified_after` returns 0 rows most cycles
+export const WP_UPDATE_LOOKBACK_MIN = 10; // cursor overlap, absorbs modified_after tz ambiguity
+export const WP_UPDATE_MAX_AGE_DAYS = 60; // edits to posts older than this never fire
+export const WP_UPDATE_MAX_PER_CYCLE = 10; // per site per 2-min run; remainder carries forward
+export const WP_UPDATE_MAX_PER_HOUR = 60; // per site
+export const WP_UPDATE_MAX_PER_DAY = 300; // per site
+export const WP_UPDATE_MAX_PER_POST_PER_HOUR = 20; // backstop against an unforeseen per-article loop
+export const WP_HASH_CAP = 800; // content hashes retained per site (~60 days at ~10 posts/day)
+export const WP_BOOTSTRAP_HASH_PAGE = 100; // posts hashed on first run so publish-echoes don't fire
+
+/**
  * Publisher logos for the channel-level <image> (Google's branding request).
  * These are each site's WordPress site icon at full resolution (512x512 PNG) —
  * the `site_icon_url` from `/wp-json/`, i.e. the uncropped original rather than

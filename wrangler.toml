@@ -35,6 +35,12 @@ TOMBSTONE_DAYS = "14"
 WP_POLL_ENABLED = "false"
 # When enabled: "true" = detect + log new posts but DON'T POST the webhook (safe dry-run).
 WP_DRY_RUN = "false"
+# Updated-article poller. Fires a SEPARATE hook (secret UPDATE_WEBHOOK_URL) when an
+# article's *content* changes. Gated on WP_POLL_ENABLED too, since it shares the
+# per-site state. Zapier writes an article summary back into WP meta after every
+# publish/update, which bumps post_modified — the content-hash gate is what stops
+# that becoming an infinite loop. See CLAUDE.md before touching it.
+WP_UPDATE_POLL_ENABLED = "false"
 
 # ---- Custom domain for the feed (optional but recommended) ----
 # Uncomment after adding feeds.lnn.co to this Cloudflare account. Otherwise the

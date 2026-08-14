@@ -31,6 +31,10 @@ INGEST_WEBHOOK_URL=https://hooks.zapier.com/hooks/catch/xxxxxxx/yyyyyyy
 WP_POLL_ENABLED=false
 WP_DRY_RUN=true
 
+# Updated-article poller — a SEPARATE Zapier catch hook from the publish one.
+UPDATE_WEBHOOK_URL=https://hooks.zapier.com/hooks/catch/xxxxxxx/zzzzzzz
+WP_UPDATE_POLL_ENABLED=false
+
 # Optional — only if you later automate the Google Drive upload (service account JSON, single line)
 # GOOGLE_SA_JSON=
 # GOOGLE_DRIVE_PARENT_FOLDER_ID=
