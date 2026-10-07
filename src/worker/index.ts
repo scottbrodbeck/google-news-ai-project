@@ -1,12 +1,12 @@
-import { fetchArticles } from "../lib/airtable";
 import { buildFeed } from "../lib/render";
-import { FIELD_IDS, FIELD_NAMES, SITES_IN_SCOPE } from "../lib/config";
+import { listArticles, listRetracted, assembleLive, type LnnClient } from "../lib/lnntools";
 import { LOGO_PNG } from "./logo";
 
 /** Worker bindings + vars + secrets. */
 export interface Env {
   FEED_BUCKET: R2Bucket;
-  AIRTABLE_TOKEN: string;
+  LNN_API_TOKEN: string; // LNN Tools archive API (bearer) — the article source
+  LNN_API_BASE?: string; // defaults to https://api.lnn.co
   FEED_PATH_TOKEN: string;
   FEED_SECRET: string;
   CHANNEL_TITLE: string;
@@ -22,24 +22,6 @@ const LIVE_META = "live/google-news.meta.json";
 const STALE_MS = 5 * 60 * 1000;
 const MAX_BYTES = 50 * 1024 * 1024; // 50 MiB hard limit per Google
 
-/** filterByFormula: in-scope sites AND (recent OR a flagged tombstone still in its window). */
-function liveFormula(windowDays: number, tombDays: number): string {
-  const siteOr = SITES_IN_SCOPE.map((s) => `{${FIELD_NAMES.site}}='${s}'`).join(",");
-  const outer = windowDays + tombDays;
-  return (
-    "AND(" +
-    `OR(${siteOr}),` +
-    "OR(" +
-    `IS_AFTER({${FIELD_NAMES.publicationTime}},DATEADD(NOW(),-${windowDays},'days')),` +
-    `AND({${FIELD_NAMES.deleteFromFeed}}=1,OR(` +
-    `IS_AFTER({${FIELD_NAMES.publicationTime}},DATEADD(NOW(),-${outer},'days')),` +
-    `IS_AFTER({${FIELD_NAMES.lastUpdated}},DATEADD(NOW(),-${tombDays},'days'))` +
-    "))" +
-    ")" +
-    ")"
-  );
-}
-
 /**
  * Channel <link>: per RSS 2.0 this is the website the channel corresponds to —
  * the publisher's homepage, not the feed's own address. (The archive already
@@ -50,15 +32,26 @@ function channelLink(env: Env): string {
   return env.CHANNEL_LINK || "https://lnn.co";
 }
 
+const DAY_MS = 86_400_000;
+const isoSeconds = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+/**
+ * Everything published in the last WINDOW_DAYS (bodies + full-res images come in the
+ * list rows), plus a tombstone for every article retracted in the last
+ * TOMBSTONE_DAYS, whatever its publish date. ~4 API calls per build.
+ */
 async function buildLive(env: Env): Promise<{ xml: string; count: number; bytes: number }> {
   const windowDays = Number(env.WINDOW_DAYS || "3");
   const tombDays = Number(env.TOMBSTONE_DAYS || "14");
-  const articles = await fetchArticles({
-    token: env.AIRTABLE_TOKEN,
-    filterByFormula: liveFormula(windowDays, tombDays),
-    sortFieldId: FIELD_IDS.publicationTime,
-    sortDir: "desc",
-  });
+  const now = Date.now();
+  const client: LnnClient = { token: env.LNN_API_TOKEN, baseUrl: env.LNN_API_BASE };
+
+  const [current, retracted] = await Promise.all([
+    listArticles(client, isoSeconds(now - windowDays * DAY_MS)),
+    listRetracted(client, isoSeconds(now - tombDays * DAY_MS)),
+  ]);
+  const articles = assembleLive(current, retracted);
+
   const xml = buildFeed(
     articles,
     {
@@ -145,9 +138,16 @@ export default {
 
       if (stale) {
         // Fallback build so Google never gets an empty/expired response.
-        const built = await buildLive(env);
-        await putLive(env, built);
-        return rss(built.xml);
+        try {
+          const built = await buildLive(env);
+          await putLive(env, built);
+          return rss(built.xml);
+        } catch (err) {
+          // Source down / bad token: the last good feed beats a 500. Only with
+          // nothing cached at all is there nothing to serve.
+          console.error(`[live] fallback build failed, serving cached feed: ${String(err)}`);
+          if (!obj) return new Response("Feed temporarily unavailable", { status: 503, headers: { "Retry-After": "120" } });
+        }
       }
       return new Response(obj!.body, {
         headers: { "Content-Type": "application/rss+xml; charset=utf-8", "Cache-Control": "public, max-age=120" },

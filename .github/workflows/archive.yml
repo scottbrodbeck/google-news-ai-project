@@ -37,7 +37,7 @@ jobs:
       - run: npm ci
       - name: Generate archive
         env:
-          AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
+          LNN_API_TOKEN: ${{ secrets.LNN_API_TOKEN }}
           # R2 upload (so the Worker's /archive/<FEED_SECRET>/… download link works)
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}

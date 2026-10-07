@@ -7,7 +7,7 @@ Two jobs, one codebase, sharing `src/lib/`:
 - **Live feed** → Cloudflare Worker (`src/worker/index.ts`): serves a private RSS endpoint Google crawls every couple of minutes, rebuilt to R2 on a `*/2` cron.
 - **Quarterly archive** → Node script (`src/scripts/archive.ts`) run by a **GitHub Actions cron** (`.github/workflows/archive.yml`) — cloud, no local box. Kept off the Worker cron because a full quarter is heavier than a 128 MB isolate is comfortable with. Still runnable anywhere via `npm run archive`.
 
-Data source: Airtable `News articles` / `O&O` (`appZn7eNiJ4BO89G1` / `tblrMZhmQKluhERnP`), maintained by Zapier. **Read-only — never write to it.**
+Data source: the **LNN Tools archive API** (`https://api.lnn.co`, bearer token `LNN_API_TOKEN`) via `src/lib/lnntools.ts`. **Read-only.** It replaced Airtable on 2026-10-07, when Airtable stopped being updated. `src/lib/airtable.ts` is kept for reference/rollback but nothing imports it at runtime.
 
 ## Hard rules from Google's spec (don't "fix" these)
 - **Only these four namespaces**, exactly: `content`, `dcterms`, `licensed_news`, `media`. Do **not** add `atom:` (no self-link) or `dc:`.
@@ -17,29 +17,39 @@ Data source: Airtable `News articles` / `O&O` (`appZn7eNiJ4BO89G1` / `tblrMZhmQK
 - `media:title` is emitted only when a photo caption exists.
 - **Channel `<image>`** (added at Google's request for publisher branding) is plain RSS 2.0 — *not* a new namespace, so it doesn't violate the four-namespace rule. Its `<title>`/`<link>` are derived from the channel's in `render.head()` and must keep mirroring them. Live feed uses the LNN logo the Worker serves at `/logo.png` (bundled from `assets/lnn-logo.png` via `src/worker/logo.ts`, so it ships with every deploy); archive day-files use each publication's own 512×512 site icon from `SITE_LOGO`. **Swapping the logo takes two steps:** replace `assets/lnn-logo.png`, regenerate `src/worker/logo.ts` (base64), **and bump the `?v=` on `CHANNEL_IMAGE_URL`** — the response is `max-age=86400`, so without a new URL the old image is served for up to a day (this bit us on the 128→512 swap). `robots.txt` explicitly `Allow`s `/logo.png` — the blanket `Disallow: /` would otherwise stop Google fetching it.
 - `pubDate` = RFC822; `dcterms:modified` = ISO 8601 with `+00:00` offset (to match Google's example), not `Z`.
-- Article `link` is the canonical URL (already correct in Airtable) and doubles as `guid`. No custom query params (UTM is allowed).
+- Article `link` is the canonical URL (already canonical in the source) and doubles as `guid`. No custom query params (UTM is allowed).
 - Each live-feed fetch must be < 50 MiB (asserted in `buildLive`). Each archive day-file < 50 MB (warns; split as `feed-YYYY-MM-DD_NN.xml` if ever exceeded).
 
-## Field mapping
-All field IDs live in `src/lib/config.ts`, including `FIELD_IDS.deleteFromFeed = "fldDA1Dg18waeRqeJ"` (the `Delete from Google Feed` checkbox).
-- `filterByFormula` references field **names** (`FIELD_NAMES`); projection uses field **IDs** (`returnFieldsByFieldId=true`).
+## LNN Tools API — facts the code depends on
+Schema: `GET /archive/openapi.json` (same bearer token; the bare `/openapi.json` needs a browser session). Verified against the live API 2026-10-07:
+- **List** `GET /archive/articles?site=&since=&until=&limit=&fields=body,featured`. `fields=body` puts `content_html`/`content_text` on each row (there is **no `body` key**); `fields=featured` includes `featured.full`, the library original. Both are byte-identical to the detail route (`/archive/articles/{site}/{wp_id}`), so the feed makes **no per-article calls**. `limit` caps at 200; `since` inclusive, `until` exclusive; newest-first by `published_at`. The default list **hides retracted rows**.
+- **Never derive the full-res URL** from `featured.src` by stripping `-600x400`: originals often keep an uppercase extension (`.JPEG`) that WordPress lowercases on derivatives, so derived URLs 404'd on 11/79 recent posts. Use `featured.full`.
+- **Retractions** `GET /archive/articles?site=a,b,c&gone_since=<ISO>` returns rows whose `gone_at` ≥ it, whatever their publish date, with the URL **as it was while published** (never the `__trashed` slug). `gone_at` is set on trash/delete/back-to-draft/private and cleared on republish; LNN Tools polls WordPress for withdrawals every 5 min. Use `gone_since`, not `include_gone=true` (that one still applies the publish-date window).
+- **Paging:** `offset` now works, but `listSite()` deliberately walks `until` backward (keyset): offset pages shift if a post is published or retracted mid-walk, which can silently skip a row. Each page re-reads the oldest second (+1s, `until` is exclusive) and de-dupes by `wp_id`.
+- Unknown query params are logged, not rejected (rejection may come later). Send only documented ones.
+- Python's default User-Agent gets a 403 (bot filter). Node/Worker fetch is fine; we send `lnn-google-news-feed/1.0` anyway.
+- **No `flag` filter.** Sponsored posts went to Google via Airtable (verified), so `!sponsored` would shrink the licensed corpus.
+- **Daily Debriefs are not in LNN Tools** (`/archive/articles/arlnow/426069` → "not in the archive"). That's fine: Scott confirmed 2026-10-07 they're **not wanted in the Google feed** (they went via Airtable only because Airtable carried everything).
+- **Parity with Airtable, 2026-Q3:** 1,711/1,711 articles accounted for (Airtable's other 191 rows were Debriefs). 1,708 matched URL-for-URL; on the other 3 the slug was edited after publish, and LNN Tools has the current URL (Airtable's 301s to it).
 
-**Verified against the live base 2026-06-26** (all 15 field IDs correct). Types that drove design choices:
-- `Full Res Image` + `Image URL` are **`url`** fields → plain strings (not attachments), so `airtable.ts`'s `str()` mapper is correct as-is.
-- `Site` is a **`singleSelect`**; the raw REST API returns the option **name** as a string ("ARLnow"), which is what `{Site}='ARLnow'` in `filterByFormula` and `SITES_IN_SCOPE` expect.
-- `Photo caption` + `Unique ID` are **formula** fields (string results); empty caption is omitted from the response → `media:title` dropped automatically. The caption is regex-extracted from raw article HTML, so it carries HTML entities (`&#8217;`, `&amp;`) — `render` runs it through `decodeEntitiesText` before XML-escaping so `media:title` isn't double-escaped.
-- `RSS Description` is the WordPress **excerpt**, so it has the same two problems and gets the same treatment in `render`'s `cleanDescription()`: raw HTML entities (`&#8220;`, `&hellip;`) are decoded before XML-escaping (else readers see a literal `&#8220;`), and gallery-led posts have the slider nav scraped into the excerpt (`"Previous Image 1/3 Next Image …"`) which is stripped as a prefix. Verified against the live feed 2026-07-30 (39 double-escaped + 3 nav-polluted descriptions).
-- `Last Updated` is a **`lastModifiedTime`** field (good — spec §9.2 ideal) watching Headline, Article, Link, Category, Image URL, Author. **It does NOT watch `Delete from Google Feed`** — see the tombstone caveat below.
-- `Publication time`/`Last Updated` come back as UTC ISO (`...Z`) regardless of display TZ.
+## Field mapping (`mapItem` in `lnntools.ts`)
+One list row → `ArticleRecord`. `title`→headline, `url`→link/guid, `published_at`/`modified_at`, `authors[]`/`categories[]` joined with `", "`, `excerpt`→rssDescription, `content_html`/`content_text`→body, `featured.full`→fullResImage, `featured.src`→imageUrl, `featured.caption`→photoCaption, `gone_at`→deleteFromFeed. `uniqueId` = `site/wp_id` (list rows carry no id).
+- **`rssDescription` is the `excerpt`, never `summary`.** `summary` (and the detail route's `ai`) is Gemini output, and model-generated text must not go into a licensed feed. A test asserts this.
+- Bylines are PublishPress `author_names`, matching WordPress. Airtable's were wrong on 5/30 articles checked (generic "ARLnow.com" fallbacks, a dropped AP co-byline, one wrong reporter).
+- `render`'s entity decoding (`cleanDescription()`, `decodeEntitiesText` on the caption) stays. LNN Tools text arrives decoded, and decoding again is harmless.
+
+## Live-feed build
+`buildLive()` makes ~4 API calls in parallel: one list per site for the last `WINDOW_DAYS`, plus one `gone_since` call for the last `TOMBSTONE_DAYS`. `assembleLive()` merges them (a retraction wins if an article is in both) newest-first. ~80 items / ~400 KB, ~300 ms. No R2 state besides the feed itself.
+- If a fallback build in the fetch handler throws (source down, bad token), the Worker serves the **last good feed** instead of a 500, and returns 503 only when nothing is cached.
 
 ## Deletions / tombstones
-Articles are rarely pulled. To remove one from Google, an editor checks `Delete from Google Feed`. The live query includes flagged records still within the window, and `renderItem` emits a minimal `licensed_news:deleted=yes` item (flag wins over normal rendering). Window = `WINDOW_DAYS + TOMBSTONE_DAYS` by publish date, OR `TOMBSTONE_DAYS` by `Last Updated`. Don't hard-delete the Airtable row while you want the tombstone sent.
-
-- **Archive vs live:** the live feed tombstones (`emitTombstones: true`); the **archive omits** retracted articles entirely (`emitTombstones: false`) — a quarterly snapshot shouldn't carry a "deleted" marker.
-- **⚠️ Known gap — deleting long after publish:** because `Last Updated` (lastModifiedTime) does **not** watch the `Delete from Google Feed` checkbox, checking the box on an article older than `WINDOW_DAYS + TOMBSTONE_DAYS` (17 days) bumps nothing, so **neither** tombstone clause fires and no tombstone is sent. Deletions near publish (the common case) work via the publish-date clause. **Fix (Airtable config, by Scott):** add `Delete from Google Feed` to the `Last Updated` field's watched fields (or set it to watch *all* fields) so a box-check bumps `Last Updated` → the `TOMBSTONE_DAYS` clause fires.
+A retraction is `gone_at` on the LNN Tools record; editors don't do anything feed-specific — trashing or unpublishing the post in WordPress is the signal. The live feed sends a minimal `licensed_news:deleted=yes` item (title, link/guid, pubDate; no body or media) for **`TOMBSTONE_DAYS` (14) after the retraction**, then stops — Google's model per spec §4.6. Because it's keyed on `gone_at`, retracting an article months after publication still reaches Google.
+- **Archive vs live:** the live feed tombstones (`emitTombstones: true`); the **archive omits** retracted articles entirely (`emitTombstones: false`, and `listSite` drops `gone_at` rows) — a quarterly snapshot shouldn't carry a "deleted" marker.
+- Removing an article from the feed is NOT enough on its own: the feed is a rolling window, so every article eventually disappears, and absence tells Google nothing. Only the tombstone does.
+- No real retraction existed in the archive as of 2026-10-07 to test against; the path is covered by fixtures shaped per the API docs (`npm test` → "LNN Tools retractions").
 
 ## Day bucketing
-Archive files are bucketed by **America/New_York** calendar day (articles store UTC). Airtable filters use a padded UTC window; exact ET-day filtering happens in JS (`easternDayKey`). Don't tighten the Airtable date bounds and remove the JS filter — DST makes exact formula bounds fragile.
+Archive files are bucketed by **America/New_York** calendar day (articles store UTC). The API query uses a padded UTC window (`since`/`until`); exact ET-day filtering happens in JS (`easternDayKey`). Don't tighten the bounds and remove the JS filter — DST makes exact bounds fragile.
 
 ## Sanitizer portability
 `sanitize.ts` uses `htmlparser2` (pure JS) so the same cleaner runs in the Worker and Node. If `wrangler deploy`/bundling ever complains about a Node built-in, swap the Worker's sanitize path for a Cloudflare `HTMLRewriter` implementation (strip `script/style/iframe/noscript/form/img`, keep the same tag allowlist) and keep htmlparser2 for the Node script. The render layer only depends on `sanitizeArticleHtml(html): string`.
@@ -56,10 +66,10 @@ Archive files are bucketed by **America/New_York** calendar day (articles store 
 
 ## Archive script specifics
 - Cloud schedule: **GitHub Actions** (`.github/workflows/archive.yml`), triggered by **Zapier** via `repository_dispatch` (event type `archive`). Zapier owns the quarterly schedule (Schedule → Code-by-Zapier POST), so the workflow has **no `schedule:` trigger** and GitHub's ~60-day auto-disable never applies. Also `workflow_dispatch` for manual `quarter`/`sample` runs (Zapier passes the same via `client_payload`). Reads secrets from the runner env: `npm run archive` uses `--env-file-if-exists=.dev.vars`, so a missing file falls back to `process.env`. Always attaches the zip as a run artifact; uploads to R2 if those secrets are set. On finish (success or failure) a step POSTs `{status, link, quarter, fileCount, sizeMB, run_url}` to `ZAPIER_WEBHOOK_URL`; `main()` writes `out/result.json` for that callback.
-- Run anywhere: `npm run archive` (last quarter) or `-- --quarter 2026-Q2` or `-- --sample 2026-06-26`. `--sample` derives its quarter from the day (`quarterOfDay`) and scopes the Airtable query to just that day.
+- Run anywhere: `npm run archive` (last quarter) or `-- --quarter 2026-Q2` or `-- --sample 2026-06-26`. `--sample` derives its quarter from the day (`quarterOfDay`) and scopes the API query to just that day.
 - Uploads the zip to R2 via the S3 API (`aws4fetch`); the download link points at the Worker's `/archive/...` route.
 - Notifications are owned by Zapier (the callback above), so the workflow doesn't pass `SLACK_WEBHOOK_URL`/`RESEND_API_KEY` — those code paths still exist for local runs.
 - Optional future: direct Google Drive upload via a service account (JWT → Drive API) to remove the manual drag — stub it in `deliver()`/a new module; currently out of scope.
 
 ## Sanity checks when changing rendering
-Run **`npm test`** (`test/validate.ts`) — 28 assertions over real + synthetic fixtures that encode spec §10: well-formed XML (parsed via `fast-xml-parser`), exactly the 4 namespaces (no `atom`/`dc`), RFC822 pubDate, ISO-8601 `+00:00` modified, no `script`/`iframe`/`noscript`/`img` in `content:encoded`, images use Full Res, `media:title` only with a caption, archive has no `media:*`, tombstone behavior, and the `mapRow` mapping. It writes `out/{live,archive}-sample.xml` to eyeball. The W3C feed validator will still flag the custom namespaces — that's expected.
+Run **`npm test`** (`test/validate.ts`) — 50 assertions over real + synthetic fixtures that encode spec §10: well-formed XML (parsed via `fast-xml-parser`), exactly the 4 namespaces (no `atom`/`dc`), RFC822 pubDate, ISO-8601 `+00:00` modified, no `script`/`iframe`/`noscript`/`img` in `content:encoded`, images use Full Res, `media:title` only with a caption, archive has no `media:*`, tombstone behavior, the LNN Tools `mapItem` mapping (incl. excerpt-not-summary) and retraction→tombstone path, and the legacy `mapRow`. It writes `out/{live,archive}-sample.xml` to eyeball. The W3C feed validator will still flag the custom namespaces — that's expected.

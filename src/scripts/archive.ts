@@ -13,9 +13,9 @@ import { writeFile, mkdir } from "node:fs/promises";
 import { zipSync } from "fflate";
 import { AwsClient } from "aws4fetch";
 
-import { fetchArticles } from "../lib/airtable";
+import { listSite, mapItem, type LnnClient } from "../lib/lnntools";
 import { buildFeed } from "../lib/render";
-import { FIELD_NAMES, SITES_IN_SCOPE, SITE_LOGO } from "../lib/config";
+import { SITES_IN_SCOPE, SITE_LOGO } from "../lib/config";
 import { easternDayKey, easternYear, lastCompletedQuarter, parseQuarter, quarterOfDay, type Quarter } from "../lib/dates";
 import { sendSlack, sendEmail } from "../lib/notify";
 import type { ArticleRecord } from "../lib/types";
@@ -28,18 +28,7 @@ function arg(name: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
-function siteWindowFormula(site: string, fromUTC: string, toUTC: string): string {
-  // Padded UTC window; exact ET-day filtering happens below in JS.
-  return (
-    "AND(" +
-    `{${FIELD_NAMES.site}}='${site}',` +
-    `IS_AFTER({${FIELD_NAMES.publicationTime}},DATETIME_PARSE('${fromUTC}')),` +
-    `IS_BEFORE({${FIELD_NAMES.publicationTime}},DATETIME_PARSE('${toUTC}'))` +
-    ")"
-  );
-}
-
-/** UTC instant for an ET day (YYYY-MM-DD) shifted by `deltaDays`, for padded Airtable bounds. */
+/** UTC instant for an ET day (YYYY-MM-DD) shifted by `deltaDays`, for the padded fetch window. */
 function dayBoundUTC(etDay: string, deltaDays: number): string {
   const d = new Date(`${etDay}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + deltaDays);
@@ -59,20 +48,20 @@ async function collectGroups(q: Quarter, onlyDay?: string): Promise<DayGroup[]> 
   // otherwise pull the whole quarter window. Exact ET-day filtering still happens in JS.
   const fromUTC = onlyDay ? dayBoundUTC(onlyDay, -1) : q.fetchFromUTC;
   const toUTC = onlyDay ? dayBoundUTC(onlyDay, 2) : q.fetchToUTC;
+  const client: LnnClient = { token: required("LNN_API_TOKEN"), baseUrl: process.env.LNN_API_BASE };
   for (const site of SITES_IN_SCOPE) {
-    const rows = await fetchArticles({
-      token: required("AIRTABLE_TOKEN"),
-      filterByFormula: siteWindowFormula(site, fromUTC, toUTC),
-      sortFieldId: undefined,
-    });
+    // listSite returns live articles only: retracted ones are omitted from the
+    // archive entirely (no tombstones in a snapshot). Rows carry their bodies.
+    const listed = await withRetry(() => listSite(client, site, fromUTC, toUTC));
+    const rows = listed
+      .filter((a) => {
+        const day = easternDayKey(a.published_at);
+        return onlyDay ? day === onlyDay : day >= q.etStart && day <= q.etEnd; // drop padded-window spillover
+      })
+      .map(mapItem);
+    console.log(`[archive] ${site}: ${rows.length} articles`);
     for (const a of rows) {
-      if (!a.publicationTime) continue;
       const day = easternDayKey(a.publicationTime);
-      if (onlyDay) {
-        if (day !== onlyDay) continue;
-      } else if (day < q.etStart || day > q.etEnd) {
-        continue; // drop padded-window spillover
-      }
       const key = `${site}|${day}`;
       let g = groups.get(key);
       if (!g) {
@@ -152,6 +141,17 @@ async function deliver(q: Quarter, fileCount: number, zipBytes: Uint8Array, key:
   console.log(summary);
   console.log(`link: ${link}`);
   return link;
+}
+
+/** One retry with a short backoff — rides out a transient 5xx/timeout mid-quarter. */
+async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    console.warn(`[archive] retrying after: ${String(err)}`);
+    await new Promise((r) => setTimeout(r, 2000));
+    return fn();
+  }
 }
 
 function required(name: string): string {
