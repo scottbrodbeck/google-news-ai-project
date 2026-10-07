@@ -3,7 +3,7 @@ import { WP_POLL_PER_PAGE, WP_UPDATE_PER_PAGE, WP_UPDATE_MAX_AGE_DAYS } from "./
 
 /**
  * WordPress REST source for the publish poller. Pure: uses only `fetch`/`URL`,
- * so it compiles for both the Worker and Node builds (like airtable.ts).
+ * so it compiles for both the Worker and Node builds.
  *
  * The poller replaces the WordPress publish plugin's one job — POSTing to the
  * Zapier catch-hook on publish. It does NOT touch the feed/archive pipeline.
@@ -42,19 +42,55 @@ export interface WebhookPayload {
   Author: string;
 }
 
-/** Fetch the most-recent published posts for one site, cachebusted for freshness. */
+const WP_HEADERS = { Accept: "application/json", "Cache-Control": "no-cache", "User-Agent": "lnn-google-news-poller" };
+
+async function getPosts<T>(url: URL, what: string): Promise<T[]> {
+  url.searchParams.set("_cb", String(Date.now())); // cachebuster — unique URL => no edge cache hit
+  const res = await fetch(url.toString(), { headers: WP_HEADERS });
+  if (!res.ok) throw new Error(`WP ${url.origin} ${what} ${res.status}: ${await res.text()}`);
+  return (await res.json()) as T[];
+}
+
+const postsUrl = (baseUrl: string) => new URL(`${baseUrl.replace(/\/$/, "")}/wp-json/wp/v2/posts`);
+
+/**
+ * Ids + publish dates of the most recent published posts — what every poll runs.
+ *
+ * Deliberately NOT `_embed`: the embedded query is ~2 MB and ~7 s of uncached
+ * PHP per site, and the poller runs every 2 minutes, almost always to learn that
+ * nothing is new. This is ~1 KB / ~0.3 s. Full posts are fetched only for unseen
+ * ids (fetchPostsByIds), so payloads are unchanged.
+ */
+export async function fetchRecentIds(
+  baseUrl: string,
+  perPage: number = WP_POLL_PER_PAGE
+): Promise<Array<Pick<WpPost, "id" | "date">>> {
+  const url = postsUrl(baseUrl);
+  url.searchParams.set("per_page", String(perPage));
+  url.searchParams.set("orderby", "date");
+  url.searchParams.set("order", "desc");
+  url.searchParams.set("_fields", "id,date");
+  return getPosts(url, "recent ids");
+}
+
+/** Full posts (with `_embed`) for specific ids — only called when there's something new. */
+export async function fetchPostsByIds(baseUrl: string, ids: number[]): Promise<WpPost[]> {
+  if (!ids.length) return [];
+  const url = postsUrl(baseUrl);
+  url.searchParams.set("include", ids.join(","));
+  url.searchParams.set("per_page", String(Math.min(100, ids.length)));
+  url.searchParams.set("_embed", "1");
+  return getPosts(url, "posts by id");
+}
+
+/** The most recent published posts in full (`_embed`). Used once, to bootstrap a site. */
 export async function fetchRecentPosts(baseUrl: string, perPage: number = WP_POLL_PER_PAGE): Promise<WpPost[]> {
-  const url = new URL(`${baseUrl.replace(/\/$/, "")}/wp-json/wp/v2/posts`);
+  const url = postsUrl(baseUrl);
   url.searchParams.set("per_page", String(perPage));
   url.searchParams.set("_embed", "1");
   url.searchParams.set("orderby", "date");
   url.searchParams.set("order", "desc");
-  url.searchParams.set("_cb", String(Date.now())); // cachebuster — unique URL => no edge cache hit
-  const res = await fetch(url.toString(), {
-    headers: { Accept: "application/json", "Cache-Control": "no-cache", "User-Agent": "lnn-google-news-poller" },
-  });
-  if (!res.ok) throw new Error(`WP ${baseUrl} ${res.status}: ${await res.text()}`);
-  return (await res.json()) as WpPost[];
+  return getPosts(url, "recent posts");
 }
 
 /**
@@ -71,18 +107,13 @@ export async function fetchModifiedSince(
   sinceIso: string,
   perPage: number = WP_UPDATE_PER_PAGE
 ): Promise<WpPost[]> {
-  const url = new URL(`${baseUrl.replace(/\/$/, "")}/wp-json/wp/v2/posts`);
+  const url = postsUrl(baseUrl);
   url.searchParams.set("modified_after", sinceIso);
   url.searchParams.set("orderby", "modified");
   url.searchParams.set("order", "asc"); // ascending so the cursor can advance safely
   url.searchParams.set("per_page", String(perPage));
   url.searchParams.set("_embed", "1");
-  url.searchParams.set("_cb", String(Date.now()));
-  const res = await fetch(url.toString(), {
-    headers: { Accept: "application/json", "Cache-Control": "no-cache", "User-Agent": "lnn-google-news-poller" },
-  });
-  if (!res.ok) throw new Error(`WP ${baseUrl} modified ${res.status}: ${await res.text()}`);
-  return (await res.json()) as WpPost[];
+  return getPosts(url, "modified");
 }
 
 /** Prefer the full-size original; fall back to the base featured source_url. */

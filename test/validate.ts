@@ -17,6 +17,7 @@ import { XMLValidator, XMLParser } from "fast-xml-parser";
 
 import { buildFeed, type FeedMeta } from "../src/lib/render";
 import { mapRow } from "../src/lib/airtable";
+import { mapItem, assembleLive, type LnnListItem } from "../src/lib/lnntools";
 import { FIELD_IDS, SITE_LOGO } from "../src/lib/config";
 import { toRFC822, toISO8601Offset, easternDayKey, quarterOfDay } from "../src/lib/dates";
 import type { ArticleRecord } from "../src/lib/types";
@@ -566,6 +567,134 @@ check("contentHash is stable, and ignores fields we don't send", () => {
     contentHash(p),
     contentHash({ ...p, modified_gmt: "2030-01-01T00:00:00", article_summary: "x", acf: { y: 1 } } as WpPost)
   );
+});
+
+// ---- LNN Tools mapping (the Airtable replacement) ---------------------------
+// Fixture is a REAL list row from the archive API on 2026-10-07 (arlnow/426111,
+// fields=body,featured), trimmed to the fields the mapper reads.
+console.log("\nLNN Tools mapItem");
+
+const LNN_ROW: LnnListItem = {
+  site: "arlnow",
+  wp_id: 426111,
+  title: "Westover Taco sounds alarm on struggles for local restaurants",
+  url: "https://www.arlnow.com/2026/10/07/westover-taco-sounds-alarm-on-struggles-for-local-restaurants/",
+  status: "publish",
+  authors: ["Nolan Stout"],
+  categories: ["Around Town"],
+  published_at: "2026-10-07T17:45:35Z",
+  modified_at: "2026-10-07T17:47:40Z",
+  excerpt: "The owner of a Westover taqueria is calling for more community support during tough times for local businesses.",
+  summary: "AI-GENERATED SUMMARY — MUST NOT APPEAR IN THE FEED",
+  content_html: "<p>The owner of a Westover taqueria is calling for more community support.</p>",
+  content_text: "The owner of a Westover taqueria is calling for more community support.",
+  featured: {
+    src: "https://www.arlnow.com/wp-content/uploads/2026/03/img_3332-600x450.jpg",
+    full: "https://www.arlnow.com/wp-content/uploads/2026/03/img_3332.jpg",
+    caption: "Westover Taco at 5849 Washington Blvd (staff photo by Katie Taranto)",
+  },
+  gone_at: null,
+};
+
+check("mapItem fills every ArticleRecord field from a real list row", () => {
+  const a = mapItem(LNN_ROW);
+  assert.equal(a.site, "ARLnow"); // slug -> SiteName
+  assert.equal(a.uniqueId, "arlnow/426111"); // list rows carry no id; built from site/wp_id
+  assert.equal(a.headline, LNN_ROW.title);
+  assert.equal(a.link, LNN_ROW.url);
+  assert.equal(a.publicationTime, "2026-10-07T17:45:35Z");
+  assert.equal(a.lastUpdated, "2026-10-07T17:47:40Z");
+  assert.equal(a.author, "Nolan Stout");
+  assert.equal(a.category, "Around Town");
+  assert.equal(a.articleHtml, LNN_ROW.content_html);
+  assert.equal(a.articlePlain, LNN_ROW.content_text);
+});
+
+check("⚠️ rssDescription comes from excerpt, NEVER the AI summary", () => {
+  const a = mapItem(LNN_ROW);
+  assert.equal(a.rssDescription, LNN_ROW.excerpt);
+  assert.ok(!JSON.stringify(a).includes("AI-GENERATED SUMMARY"));
+});
+
+check("image: featured.full -> fullResImage, src -> imageUrl, caption -> photoCaption", () => {
+  const a = mapItem(LNN_ROW);
+  assert.equal(a.fullResImage, LNN_ROW.featured!.full); // the library original, not a derived guess
+  assert.ok(a.imageUrl && a.imageUrl.includes("600x450"));
+  assert.equal(a.photoCaption, LNN_ROW.featured!.caption);
+});
+
+check("gone_at drives the tombstone flag", () => {
+  assert.equal(mapItem(LNN_ROW).deleteFromFeed, false);
+  assert.equal(mapItem({ ...LNN_ROW, gone_at: "2026-10-07T20:00:00Z" }).deleteFromFeed, true);
+});
+
+check("multi-author / multi-category rows join to the Airtable string shape", () => {
+  const a = mapItem({ ...LNN_ROW, authors: ["A Reporter", "B Reporter"], categories: ["News", "Schools"] });
+  assert.equal(a.author, "A Reporter, B Reporter");
+  assert.equal(a.category, "News, Schools");
+});
+
+check("missing optionals degrade to undefined, not empty strings", () => {
+  const a = mapItem({
+    site: "ffxnow", wp_id: 1, title: "T", url: "https://www.ffxnow.com/x/",
+    published_at: "2026-10-07T00:00:00Z", featured: null, gone_at: null, authors: [],
+  });
+  assert.equal(a.author, undefined);
+  assert.equal(a.photoCaption, undefined);
+  assert.equal(a.imageUrl, undefined);
+  assert.equal(a.articleHtml, undefined);
+  assert.equal(a.deleteFromFeed, false);
+});
+
+check("an LNN-sourced record still renders a spec-valid feed", () => {
+  const xml = buildFeed([mapItem(LNN_ROW)], meta, { includeImages: true, emitTombstones: true });
+  assert.equal(XMLValidator.validate(xml), true);
+  assert.ok(xml.includes("<dcterms:creator>Nolan Stout</dcterms:creator>"));
+  assert.ok(!/\bxmlns:(atom|dc)=/.test(xml)); // still exactly the 4 namespaces
+  assert.ok(!/<img\b/i.test(xml)); // no media in content:encoded
+  assert.ok(xml.includes("img_3332.jpg")); // media:content uses the full-res original
+  assert.ok(!xml.includes("AI-GENERATED SUMMARY"));
+});
+
+// ---- retractions (gone_since -> tombstones) ---------------------------------
+// Shaped per the API docs: a gone_since row is a normal list row with gone_at set
+// and the URL as it was while published. (No real retraction exists to fixture.)
+console.log("\nLNN Tools retractions");
+
+const RETRACTED_OLD: LnnListItem = {
+  site: "alxnow", wp_id: 900001, title: "Pulled story from last year",
+  url: "https://www.alxnow.com/2025/03/02/pulled-story/", published_at: "2025-03-02T14:00:00Z",
+  gone_at: "2026-10-06T12:00:00Z",
+};
+
+check("a retraction becomes a tombstone even when published long before the window", () => {
+  const recs = assembleLive([LNN_ROW], [RETRACTED_OLD]);
+  assert.equal(recs.length, 2);
+  const t = recs.find((r) => r.uniqueId === "alxnow/900001")!;
+  assert.equal(t.deleteFromFeed, true);
+  assert.equal(recs.find((r) => r.uniqueId === "arlnow/426111")!.deleteFromFeed, false);
+});
+
+check("retraction wins if the same article is in both lists; output is newest-first", () => {
+  const pulled = { ...LNN_ROW, gone_at: "2026-10-07T20:00:00Z" };
+  const recs = assembleLive([LNN_ROW, RETRACTED_OLD], [pulled]);
+  assert.equal(recs.filter((r) => r.uniqueId === "arlnow/426111").length, 1);
+  assert.equal(recs[0]!.uniqueId, "arlnow/426111");
+  assert.equal(recs[0]!.deleteFromFeed, true);
+  assert.ok(recs[0]!.publicationTime > recs[1]!.publicationTime);
+});
+
+check("tombstone renders licensed_news:deleted with the original URL as guid, no body/media", () => {
+  const xml = buildFeed(assembleLive([], [RETRACTED_OLD]), meta, { includeImages: true, emitTombstones: true });
+  assert.equal(XMLValidator.validate(xml), true);
+  assert.ok(xml.includes("<licensed_news:deleted>yes</licensed_news:deleted>"));
+  assert.ok(xml.includes("<guid>https://www.alxnow.com/2025/03/02/pulled-story/</guid>"));
+  assert.ok(!xml.includes("content:encoded>") && !xml.includes("<media:content"));
+});
+
+check("archive omits retractions entirely (no tombstones in a snapshot)", () => {
+  const xml = buildFeed([mapItem(RETRACTED_OLD)], meta, { includeImages: false, emitTombstones: false });
+  assert.ok(!xml.includes("pulled-story"));
 });
 
 // ---- summary ----------------------------------------------------------------

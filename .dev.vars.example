@@ -1,8 +1,8 @@
 # Copy to .dev.vars (Worker local dev) and/or .env (Node archive script).
 # For production, set the Worker ones with:  wrangler secret put NAME
 
-# Airtable — Personal Access Token, read-only, scoped to base appZn7eNiJ4BO89G1
-AIRTABLE_TOKEN=pat_xxx
+# LNN Tools archive API (https://api.lnn.co) — bearer token. The article source.
+LNN_API_TOKEN=xxx
 
 # Live feed access (private-by-obscurity + secret). Generate long random values:
 #   openssl rand -hex 24

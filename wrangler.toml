@@ -30,9 +30,9 @@ WINDOW_DAYS = "3"
 TOMBSTONE_DAYS = "14"
 
 # ---- Publish poller (WordPress REST -> same Zapier webhook), replaces the WP plugin ----
-# Off by default so deploying the code is inert. The Zapier catch-hook URL is a
-# SECRET: `wrangler secret put INGEST_WEBHOOK_URL`.
-WP_POLL_ENABLED = "false"
+# ON since 2026-10-07. The Zapier catch-hook URL is a SECRET:
+# `wrangler secret put INGEST_WEBHOOK_URL`. Set to "false" + deploy to stop it.
+WP_POLL_ENABLED = "true"
 # When enabled: "true" = detect + log new posts but DON'T POST the webhook (safe dry-run).
 WP_DRY_RUN = "false"
 # Updated-article poller. Fires a SEPARATE hook (secret UPDATE_WEBHOOK_URL) when an

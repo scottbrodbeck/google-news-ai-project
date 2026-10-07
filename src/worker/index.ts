@@ -1,21 +1,22 @@
-import { fetchArticles } from "../lib/airtable";
 import { buildFeed } from "../lib/render";
 import {
-  FIELD_IDS, FIELD_NAMES, SITES_IN_SCOPE, SITE_WP_BASE, WP_SEEN_CAP, WP_HASH_CAP,
+  SITES_IN_SCOPE, SITE_WP_BASE, WP_SEEN_CAP, WP_HASH_CAP,
   WP_UPDATE_LOOKBACK_MIN, WP_UPDATE_MAX_PER_CYCLE, WP_UPDATE_MAX_PER_HOUR,
   WP_UPDATE_MAX_PER_DAY, WP_UPDATE_MAX_PER_POST_PER_HOUR,
 } from "../lib/config";
 import {
-  fetchRecentPosts, fetchModifiedSince, selectNewPosts, selectUpdatedPosts,
+  fetchRecentIds, fetchPostsByIds, fetchRecentPosts, fetchModifiedSince, selectNewPosts, selectUpdatedPosts,
   contentHash, toWebhookPayload, type WpPost,
 } from "../lib/wordpress";
+import { listArticles, listRetracted, assembleLive, type LnnClient } from "../lib/lnntools";
 import type { SiteName } from "../lib/types";
 import { LOGO_PNG } from "./logo";
 
 /** Worker bindings + vars + secrets. */
 export interface Env {
   FEED_BUCKET: R2Bucket;
-  AIRTABLE_TOKEN: string;
+  LNN_API_TOKEN: string; // LNN Tools archive API (bearer) — the article source
+  LNN_API_BASE?: string; // defaults to https://api.lnn.co
   FEED_PATH_TOKEN: string;
   FEED_SECRET: string;
   CHANNEL_TITLE: string;
@@ -38,24 +39,6 @@ const LIVE_META = "live/google-news.meta.json";
 const STALE_MS = 5 * 60 * 1000;
 const MAX_BYTES = 50 * 1024 * 1024; // 50 MiB hard limit per Google
 
-/** filterByFormula: in-scope sites AND (recent OR a flagged tombstone still in its window). */
-function liveFormula(windowDays: number, tombDays: number): string {
-  const siteOr = SITES_IN_SCOPE.map((s) => `{${FIELD_NAMES.site}}='${s}'`).join(",");
-  const outer = windowDays + tombDays;
-  return (
-    "AND(" +
-    `OR(${siteOr}),` +
-    "OR(" +
-    `IS_AFTER({${FIELD_NAMES.publicationTime}},DATEADD(NOW(),-${windowDays},'days')),` +
-    `AND({${FIELD_NAMES.deleteFromFeed}}=1,OR(` +
-    `IS_AFTER({${FIELD_NAMES.publicationTime}},DATEADD(NOW(),-${outer},'days')),` +
-    `IS_AFTER({${FIELD_NAMES.lastUpdated}},DATEADD(NOW(),-${tombDays},'days'))` +
-    "))" +
-    ")" +
-    ")"
-  );
-}
-
 /**
  * Channel <link>: per RSS 2.0 this is the website the channel corresponds to —
  * the publisher's homepage, not the feed's own address. (The archive already
@@ -66,15 +49,26 @@ function channelLink(env: Env): string {
   return env.CHANNEL_LINK || "https://lnn.co";
 }
 
+const DAY_MS = 86_400_000;
+const isoSeconds = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+
+/**
+ * Everything published in the last WINDOW_DAYS (bodies + full-res images come in the
+ * list rows), plus a tombstone for every article retracted in the last
+ * TOMBSTONE_DAYS, whatever its publish date. ~4 API calls per build.
+ */
 async function buildLive(env: Env): Promise<{ xml: string; count: number; bytes: number }> {
   const windowDays = Number(env.WINDOW_DAYS || "3");
   const tombDays = Number(env.TOMBSTONE_DAYS || "14");
-  const articles = await fetchArticles({
-    token: env.AIRTABLE_TOKEN,
-    filterByFormula: liveFormula(windowDays, tombDays),
-    sortFieldId: FIELD_IDS.publicationTime,
-    sortDir: "desc",
-  });
+  const now = Date.now();
+  const client: LnnClient = { token: env.LNN_API_TOKEN, baseUrl: env.LNN_API_BASE };
+
+  const [current, retracted] = await Promise.all([
+    listArticles(client, isoSeconds(now - windowDays * DAY_MS)),
+    listRetracted(client, isoSeconds(now - tombDays * DAY_MS)),
+  ]);
+  const articles = assembleLive(current, retracted);
+
   const xml = buildFeed(
     articles,
     {
@@ -191,17 +185,19 @@ async function newPostsForSite(
 
 /**
  * Poll one site: new posts first, then updates, against one shared state object.
- * New-first matters — a brand-new post must reach Airtable before any update for
+ * New-first matters — the Zap must see a brand-new post before any update for
  * it can fire, and firing it seeds the content hash that suppresses the
  * publish-time summary write-back from looking like an edit.
  */
 async function pollSite(env: Env, site: SiteName, dryRun: boolean, updatesOn: boolean): Promise<void> {
   const now = Date.now();
-  const posts = await fetchRecentPosts(SITE_WP_BASE[site]);
+  const base = SITE_WP_BASE[site];
+  const recent = await fetchRecentIds(base); // cheap: ids + dates only
   let state = await loadState(env, site);
 
   // --- Bootstrap: record what's already published + hash it, fire nothing ---
   if (state === null) {
+    const posts = await fetchRecentPosts(base); // one-time full fetch to seed baseline hashes
     const hashes: Record<string, string> = {};
     for (const p of posts) hashes[String(p.id)] = contentHash(p);
     state = { ids: posts.map((p) => p.id), cursor: new Date(now).toISOString().slice(0, 19), hashes, fires: [], perPost: {}, updatedAt: "" };
@@ -213,8 +209,10 @@ async function pollSite(env: Env, site: SiteName, dryRun: boolean, updatesOn: bo
   let dirty = false;
   const justPublished = new Set<number>();
 
-  // --- New posts ---
-  for (const post of selectNewPosts(posts, state.ids)) {
+  // --- New posts --- full content is fetched only for ids we haven't seen
+  const unseen = selectNewPosts(recent as WpPost[], state.ids).map((p) => p.id);
+  const fresh = unseen.length ? selectNewPosts(await fetchPostsByIds(base, unseen), state.ids) : [];
+  for (const post of fresh) {
     try {
       await firePayload(env, env.INGEST_WEBHOOK_URL!, post, dryRun, `wp-new ${site}`);
       state.ids.push(post.id);
@@ -222,7 +220,7 @@ async function pollSite(env: Env, site: SiteName, dryRun: boolean, updatesOn: bo
       justPublished.add(post.id);
       dirty = true;
     } catch (err) {
-      // Left unseen -> retried next cron. The Zap dedups by Link, so a retry can't duplicate.
+      // Left unseen -> retried next cron. (The Zap's own last-headline check guards repeats.)
       console.error(`[wp-new ${site}] id=${post.id} failed: ${(err as Error).message}`);
     }
   }
@@ -232,7 +230,7 @@ async function pollSite(env: Env, site: SiteName, dryRun: boolean, updatesOn: bo
     const from = new Date(Date.parse(`${state.cursor ?? new Date(now).toISOString().slice(0, 19)}Z`) - WP_UPDATE_LOOKBACK_MIN * 60_000)
       .toISOString()
       .slice(0, 19);
-    const modified = await fetchModifiedSince(SITE_WP_BASE[site], from);
+    const modified = await fetchModifiedSince(base, from);
     const sel = selectUpdatedPosts(modified, { hashes: state.hashes ?? {}, justPublished, nowMs: now });
 
     let fired = 0;
@@ -420,9 +418,16 @@ export default {
 
       if (stale) {
         // Fallback build so Google never gets an empty/expired response.
-        const built = await buildLive(env);
-        await putLive(env, built);
-        return rss(built.xml);
+        try {
+          const built = await buildLive(env);
+          await putLive(env, built);
+          return rss(built.xml);
+        } catch (err) {
+          // Source down / bad token: the last good feed beats a 500. Only with
+          // nothing cached at all is there nothing to serve.
+          console.error(`[live] fallback build failed, serving cached feed: ${String(err)}`);
+          if (!obj) return new Response("Feed temporarily unavailable", { status: 503, headers: { "Retry-After": "120" } });
+        }
       }
       return new Response(obj!.body, {
         headers: { "Content-Type": "application/rss+xml; charset=utf-8", "Cache-Control": "public, max-age=120" },

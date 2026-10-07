@@ -61,10 +61,11 @@ Google reviews one sample day before you send a full quarter.
 
 To retract a published article:
 
-- In Airtable, check **"Delete from Google Feed"** on that row.
-- The live feed sends Google a deletion marker. **Leave the box checked ~2 weeks**, then it ages out on its own. Don't delete the Airtable row while you want it pulled.
+- In WordPress, **trash the post or set it back to Draft/Private**. That's the whole step.
+- LNN Tools notices the withdrawal within ~5 minutes, and the live feed then sends Google a deletion marker for 2 weeks before letting it drop. This works however old the article is.
+- **Don't republish it** while you want it pulled — republishing cancels the retraction and the article returns to the feed.
 
-*Edits need no action* — change the article in Airtable as usual; the feed reflects it within minutes.
+*Edits need no action* — edit the article in WordPress as usual; the feed picks up the change once LNN Tools re-reads the post.
 
 ---
 
@@ -81,4 +82,5 @@ Open the feed URL in a browser. You should see XML listing recent articles from 
 | Re-run / sample the archive | GitHub → Actions → "Quarterly archive" |
 | Change the schedule or notifications | Zapier |
 | Rotate the feed key, see secrets | Cloudflare → Workers → `google-news-feed` |
-| Pull/edit article content | Airtable (O&O table) |
+| Pull/edit article content | WordPress (the feed reads it via LNN Tools) |
+| Stop/start the new-article webhook poller | `wrangler.toml` → `WP_POLL_ENABLED`, then `npm run deploy` |
