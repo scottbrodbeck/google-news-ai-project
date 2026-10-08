@@ -53,6 +53,7 @@ Google reviews one sample day before you send a full quarter.
 - Files come structured the way Google wants: `ARLnow/2026/feed-2026-04-01.xml`, `ALXnow/…`, `FFXnow/…` (text-only, no images).
 - Need a specific quarter or a re-run? Actions → Run workflow → **quarter** = `2026-Q2`.
 - If a run fails you'll get a Zapier alert — just re-run it from Actions.
+- If it fails with **"Refusing to build: LNN Tools doesn't hold the whole window"**, LNN Tools is running on partial data (e.g. its cloud backup while the office box is down). Re-run once the box is back — nothing incomplete was delivered.
 - Old zips auto-delete from storage after 90 days; your Drive copy is the permanent record.
 
 ---
@@ -83,4 +84,4 @@ Open the feed URL in a browser. You should see XML listing recent articles from 
 | Change the schedule or notifications | Zapier |
 | Rotate the feed key, see secrets | Cloudflare → Workers → `google-news-feed` |
 | Pull/edit article content | WordPress (the feed reads it via LNN Tools) |
-| New-article notices / update notices | LNN Tools (the Worker's old WordPress poller is off and retired) |
+| New-article notices / update notices | LNN Tools |

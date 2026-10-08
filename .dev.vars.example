@@ -24,17 +24,6 @@ R2_BUCKET=google-news-feed
 # Must be a domain that actually serves this Worker, or the download links will be dead.
 PUBLIC_BASE_URL=https://google-news-feed.local-news-now-group.workers.dev
 
-# Publish poller (WordPress REST -> same Zapier webhook). In prod set INGEST_WEBHOOK_URL
-# with `wrangler secret put`. Keep WP_POLL_ENABLED=false until cutover; WP_DRY_RUN=true
-# detects + logs new posts without POSTing the webhook.
-INGEST_WEBHOOK_URL=https://hooks.zapier.com/hooks/catch/xxxxxxx/yyyyyyy
-WP_POLL_ENABLED=false
-WP_DRY_RUN=true
-
-# Updated-article poller — a SEPARATE Zapier catch hook from the publish one.
-UPDATE_WEBHOOK_URL=https://hooks.zapier.com/hooks/catch/xxxxxxx/zzzzzzz
-WP_UPDATE_POLL_ENABLED=false
-
 # Optional — only if you later automate the Google Drive upload (service account JSON, single line)
 # GOOGLE_SA_JSON=
 # GOOGLE_DRIVE_PARENT_FOLDER_ID=

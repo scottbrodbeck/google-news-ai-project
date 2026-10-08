@@ -17,13 +17,10 @@ import { XMLValidator, XMLParser } from "fast-xml-parser";
 
 import { buildFeed, type FeedMeta } from "../src/lib/render";
 import { mapRow } from "../src/lib/airtable";
-import { mapItem, assembleLive, type LnnListItem } from "../src/lib/lnntools";
+import { mapItem, assembleLive, coverageProblems, type LnnListItem, type LnnSiteHealth } from "../src/lib/lnntools";
 import { FIELD_IDS, SITE_LOGO } from "../src/lib/config";
 import { toRFC822, toISO8601Offset, easternDayKey, quarterOfDay } from "../src/lib/dates";
 import type { ArticleRecord } from "../src/lib/types";
-import {
-  toWebhookPayload, selectNewPosts, toPluginTime, contentHash, selectUpdatedPosts, type WpPost,
-} from "../src/lib/wordpress";
 
 // ---- tiny test runner -------------------------------------------------------
 let passed = 0;
@@ -427,148 +424,6 @@ check("toRFC822 + toISO8601Offset emit the expected formats", () => {
   assert.equal(toISO8601Offset("2026-06-26T15:57:25.000Z"), "2026-06-26T15:57:25+00:00");
 });
 
-// ---- WordPress publish poller (payload parity + dedup) ----------------------
-console.log("\nWordPress poller");
-const wpPost: WpPost = {
-  id: 42430,
-  link: "https://www.alxnow.com/2026/06/26/finn-fire-brings-peruvian-nikkei-cuisine-to-old-town/",
-  date: "2026-06-26T12:30:00",
-  date_gmt: "2026-06-26T16:30:00",
-  title: { rendered: "Finn &#038; Fire brings Peruvian Nikkei cuisine to Old Town" },
-  excerpt: { rendered: "<p>An upscale Peruvian &amp; Japanese fusion spot opened&#8230;</p>\n" },
-  content: { rendered: "<p>Finn &amp; Fire began its soft opening.</p>" },
-  author_names: ["Emily Leayman", "Jane Roe"], // PublishPress returns an array
-  _embedded: {
-    author: [{ name: "alxnow" }],
-    "wp:featuredmedia": [
-      {
-        source_url: "https://www.alxnow.com/files/2026/06/finn-and-fire-2.jpg",
-        media_details: { sizes: { full: { source_url: "https://www.alxnow.com/files/2026/06/finn-and-fire-2.jpg" } } },
-      },
-    ],
-    "wp:term": [
-      [
-        { name: "Around Town", taxonomy: "category" },
-        { name: "New Restaurant", taxonomy: "category" },
-      ],
-      [{ name: "Old Town", taxonomy: "post_tag" }],
-      [{ name: "Emily Leayman", taxonomy: "author" }], // PublishPress author term — plugin includes it
-      [{ name: "some-other-taxonomy-term", taxonomy: "ppma_author" }], // must NOT appear
-    ],
-  },
-};
-check("toWebhookPayload emits exactly the 8 plugin keys", () =>
-  assert.deepEqual(Object.keys(toWebhookPayload(wpPost)).sort(), [
-    "Article", "Author", "Categories", "Excerpt", "Headline", "Image", "Time", "URL",
-  ])
-);
-check("toWebhookPayload decodes Headline; keeps Article as raw HTML; Time is plugin format", () => {
-  const p = toWebhookPayload(wpPost);
-  assert.equal(p.Headline, "Finn & Fire brings Peruvian Nikkei cuisine to Old Town");
-  assert.equal(p.Article, "<p>Finn &amp; Fire began its soft opening.</p>");
-  assert.equal(p.Time, "June 26, 2026 12:30 pm");
-  assert.equal(p.URL, wpPost.link);
-  assert.equal(p.Author, "Emily Leayman, Jane Roe"); // array byline joined
-});
-check("Headline uses ASCII quotes like the plugin (not WP's typographic ones)", () => {
-  const p = toWebhookPayload({ ...wpPost, title: { rendered: "&#8216;I&#8217;m recreating myself&#8217;: a &#8220;story&#8221;" } });
-  assert.equal(p.Headline, `'I'm recreating myself': a "story"`);
-});
-check("toPluginTime matches the plugin's format across am/pm and midnight/noon", () => {
-  assert.equal(toPluginTime("2025-04-16T14:45:25"), "April 16, 2025 2:45 pm");
-  assert.equal(toPluginTime("2025-04-16T09:05:00"), "April 16, 2025 9:05 am");
-  assert.equal(toPluginTime("2025-01-01T00:00:00"), "January 1, 2025 12:00 am");
-  assert.equal(toPluginTime("2025-12-31T12:00:00"), "December 31, 2025 12:00 pm");
-});
-check("toWebhookPayload: Categories = categories + tags (plugin parity), other taxonomies excluded", () => {
-  const p = toWebhookPayload(wpPost);
-  assert.equal(p.Categories, "Around Town, New Restaurant, Old Town, Emily Leayman");
-  assert.ok(!p.Categories.includes("ppma"), "non-category/tag taxonomy leaked");
-});
-check("toWebhookPayload: Image prefers full size; Excerpt decoded + stripped", () => {
-  const p = toWebhookPayload(wpPost);
-  assert.equal(p.Image, "https://www.alxnow.com/files/2026/06/finn-and-fire-2.jpg");
-  assert.equal(p.Excerpt, "An upscale Peruvian & Japanese fusion spot opened…");
-});
-check("selectNewPosts returns unseen ids oldest-first; all-seen -> none", () => {
-  const posts = [
-    { id: 3, date: "2026-06-26T03:00:00" },
-    { id: 1, date: "2026-06-26T01:00:00" },
-    { id: 2, date: "2026-06-26T02:00:00" },
-  ] as WpPost[];
-  assert.deepEqual(selectNewPosts(posts, [2]).map((p) => p.id), [1, 3]);
-  assert.deepEqual(selectNewPosts(posts, [1, 2, 3]).map((p) => p.id), []);
-});
-
-// ---- update poller: the loop guard -----------------------------------------
-console.log("\nUpdate poller (loop guard)");
-const NOW = Date.parse("2026-08-14T18:00:00Z");
-const upd = (over: Partial<WpPost> = {}): WpPost => ({
-  ...wpPost,
-  date_gmt: "2026-08-14T16:00:00",
-  modified_gmt: "2026-08-14T17:00:00",
-  ...over,
-});
-
-check("⚠️ summary-only change does NOT fire (breaks the Zapier write-back loop)", () => {
-  const before = upd();
-  const hashes = { [String(before.id)]: contentHash(before) };
-  // Zapier writes article_summary back into WP meta -> post_modified bumps.
-  // Nothing we send changed, so this MUST NOT fire, or we loop forever.
-  const after = { ...before, modified_gmt: "2026-08-14T17:05:00", article_summary: "AI summary text" } as WpPost;
-  const sel = selectUpdatedPosts([after], { hashes, nowMs: NOW });
-  assert.equal(sel.candidates.length, 0, "fired on a meta-only change — infinite loop risk");
-  assert.equal(sel.skippedUnchanged, 1);
-});
-check("a real content edit DOES fire", () => {
-  const before = upd();
-  const hashes = { [String(before.id)]: contentHash(before) };
-  const after = { ...before, content: { rendered: "<p>Substantively rewritten body.</p>" } };
-  assert.equal(selectUpdatedPosts([after], { hashes, nowMs: NOW }).candidates.length, 1);
-});
-check("headline / image / category edits each fire", () => {
-  const base = upd();
-  const hashes = { [String(base.id)]: contentHash(base) };
-  const variants: WpPost[] = [
-    { ...base, title: { rendered: "New headline" } },
-    { ...base, _embedded: { ...base._embedded, "wp:featuredmedia": [{ source_url: "https://x/new.jpg" }] } },
-    { ...base, _embedded: { ...base._embedded, "wp:term": [[{ name: "Breaking", taxonomy: "category" }]] } },
-  ];
-  for (const v of variants) assert.equal(selectUpdatedPosts([v], { hashes, nowMs: NOW }).candidates.length, 1);
-});
-check("no baseline hash -> fires (Zap does its own genuine-update check)", () => {
-  const sel = selectUpdatedPosts([upd()], { hashes: {}, nowMs: NOW });
-  assert.equal(sel.candidates.length, 1);
-});
-check("publish echo suppressed: a post fired as new this run can't also fire as an update", () => {
-  const p = upd();
-  const sel = selectUpdatedPosts([p], { hashes: {}, justPublished: new Set([p.id]), nowMs: NOW });
-  assert.equal(sel.candidates.length, 0);
-  assert.equal(sel.skippedJustPublished, 1);
-});
-check("posts published >60 days ago never fire (bulk-edit blast radius)", () => {
-  const old = upd({ date_gmt: "2026-05-01T10:00:00" }); // ~105 days before NOW
-  const sel = selectUpdatedPosts([old], { hashes: {}, nowMs: NOW });
-  assert.equal(sel.candidates.length, 0);
-  assert.equal(sel.skippedTooOld, 1);
-});
-check("newestModified tracks the cursor high-water mark across the batch", () => {
-  const sel = selectUpdatedPosts(
-    [upd({ id: 1, modified_gmt: "2026-08-14T17:00:00" }), upd({ id: 2, modified_gmt: "2026-08-14T17:30:00" })],
-    { hashes: {}, nowMs: NOW }
-  );
-  assert.equal(sel.newestModified, "2026-08-14T17:30:00");
-});
-check("contentHash is stable, and ignores fields we don't send", () => {
-  const p = upd();
-  assert.equal(contentHash(p), contentHash({ ...p }));
-  // modified_gmt, article_summary, acf, meta must not affect the fingerprint
-  assert.equal(
-    contentHash(p),
-    contentHash({ ...p, modified_gmt: "2030-01-01T00:00:00", article_summary: "x", acf: { y: 1 } } as WpPost)
-  );
-});
-
 // ---- LNN Tools mapping (the Airtable replacement) ---------------------------
 // Fixture is a REAL list row from the archive API on 2026-10-07 (arlnow/426111,
 // fields=body,featured), trimmed to the fields the mapper reads.
@@ -695,6 +550,47 @@ check("tombstone renders licensed_news:deleted with the original URL as guid, no
 check("archive omits retractions entirely (no tombstones in a snapshot)", () => {
   const xml = buildFeed([mapItem(RETRACTED_OLD)], meta, { includeImages: false, emitTombstones: false });
   assert.ok(!xml.includes("pulled-story"));
+});
+
+// ---- archive coverage guard (LNN Tools /archive/health) ---------------------
+// Shaped like the real /archive/health response (2026-10-07). The guard exists
+// so a quarterly run that lands while a partial cloud backup is answering fails
+// loudly instead of shipping a few days of a quarter.
+console.log("\nArchive coverage guard");
+
+const NOW_MS = Date.parse("2026-10-08T12:00:00Z");
+const fullSite = (slug: string): LnnSiteHealth => ({
+  slug, articles: 10000, oldest: "2019-01-01T14:00:12Z", newest: "2026-10-08T11:50:00Z",
+  backfill_done: true, last_ok_at: "2026-10-08T11:59:00Z", last_error: null,
+});
+const HEALTHY = ["arlnow", "alxnow", "ffxnow", "popville"].map(fullSite);
+const Q3 = { fromIso: "2026-07-01T00:00:00.000Z", toIso: "2026-10-01T05:00:00.000Z", nowMs: NOW_MS };
+
+check("full history on all three sites -> no problems", () => {
+  assert.deepEqual(coverageProblems(HEALTHY, Q3), []);
+});
+
+check("⚠️ partial backup (oldest = a few days ago) is refused, naming the site", () => {
+  const backup = HEALTHY.map((h) => (h.slug === "alxnow" ? { ...h, oldest: "2026-10-04T10:00:00Z" } : h));
+  const p = coverageProblems(backup, Q3);
+  assert.equal(p.length, 1);
+  assert.ok(p[0]!.startsWith("ALXnow:") && p[0]!.includes("oldest"));
+});
+
+check("incomplete history import and a missing site are refused", () => {
+  const p = coverageProblems([{ ...fullSite("arlnow"), backfill_done: false }, fullSite("ffxnow")], Q3);
+  assert.ok(p.some((x) => x.startsWith("ARLnow:") && x.includes("backfill_done")));
+  assert.ok(p.some((x) => x.startsWith("ALXnow:") && x.includes("missing")));
+});
+
+check("a sync that stopped before the window ended is refused; a live window only needs a recent sync", () => {
+  const stalled = HEALTHY.map((h) => ({ ...h, last_ok_at: "2026-09-28T00:00:00Z" }));
+  assert.equal(coverageProblems(stalled, Q3).length, 3);
+  // A window ending in the future (a same-day sample) can't require a sync after it ends
+  const today = { fromIso: "2026-10-08T00:00:00.000Z", toIso: "2026-10-09T05:00:00.000Z", nowMs: NOW_MS };
+  assert.deepEqual(coverageProblems(HEALTHY, today), []);
+  const lagging = HEALTHY.map((h) => ({ ...h, last_ok_at: "2026-10-08T10:00:00Z" })); // 2 h behind
+  assert.equal(coverageProblems(lagging, today).length, 3);
 });
 
 // ---- summary ----------------------------------------------------------------

@@ -26,22 +26,9 @@ CHANNEL_LINK = "https://lnn.co"
 CHANNEL_IMAGE_URL = "https://google-news-feed.local-news-now-group.workers.dev/logo.png?v=512"
 # Rolling window for the live feed (days). 3 comfortably covers Google's "last 2 days".
 WINDOW_DAYS = "3"
-# How long a checked "Delete from Google Feed" record keeps emitting a tombstone (days).
+# How long after an article is retracted in WordPress (LNN Tools' gone_at) the feed
+# keeps sending Google its deletion marker (days).
 TOMBSTONE_DAYS = "14"
-
-# ---- Publish poller (WordPress REST -> same Zapier webhook), replaces the WP plugin ----
-# OFF since 2026-10-07: the Zaps it fed are retired — new-article notices and
-# updates now go through LNN Tools. Kept for reference; see CLAUDE.md before
-# re-enabling (it needs a retry cap first).
-WP_POLL_ENABLED = "false"
-# When enabled: "true" = detect + log new posts but DON'T POST the webhook (safe dry-run).
-WP_DRY_RUN = "false"
-# Updated-article poller. Fires a SEPARATE hook (secret UPDATE_WEBHOOK_URL) when an
-# article's *content* changes. Gated on WP_POLL_ENABLED too, since it shares the
-# per-site state. Zapier writes an article summary back into WP meta after every
-# publish/update, which bumps post_modified — the content-hash gate is what stops
-# that becoming an infinite loop. See CLAUDE.md before touching it.
-WP_UPDATE_POLL_ENABLED = "false"
 
 # ---- Custom domain for the feed (optional but recommended) ----
 # Uncomment after adding feeds.lnn.co to this Cloudflare account. Otherwise the
@@ -50,6 +37,6 @@ WP_UPDATE_POLL_ENABLED = "false"
 # pattern = "feeds.lnn.co/*"
 # custom_domain = true
 
-# ---- R2 lifecycle note ----
-# Add a lifecycle rule on the bucket to expire `archive/` objects after ~30 days
-# so old quarterly zips clean themselves up (download links are short-lived anyway).
+# ---- R2 lifecycle ----
+# The bucket has a lifecycle rule expiring `archive/` objects after 90 days, so old
+# quarterly zips clean themselves up (the Drive copy is the permanent record).

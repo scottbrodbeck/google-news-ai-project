@@ -22,6 +22,12 @@ import type { ArticleRecord, SiteName } from "./types";
  */
 
 const DEFAULT_BASE = "https://api.lnn.co";
+/**
+ * Per-request timeout. api.lnn.co is proxied through Cloudflare to a box in the
+ * office; if that box is unreachable or hung, Cloudflare can take 15-100 s to give
+ * up (522/524). Without a timeout a rebuild would hang that long.
+ */
+const DEFAULT_TIMEOUT_MS = 15_000;
 const USER_AGENT = "lnn-google-news-feed/1.0";
 const PAGE_LIMIT = 200;
 
@@ -59,15 +65,20 @@ export interface LnnListItem {
 export interface LnnClient {
   token: string;
   baseUrl?: string;
+  timeoutMs?: number;
+}
+
+async function getJson<T>(c: LnnClient, path: string): Promise<T> {
+  const res = await fetch(`${c.baseUrl || DEFAULT_BASE}${path}`, {
+    headers: { Authorization: `Bearer ${c.token}`, "User-Agent": USER_AGENT },
+    signal: AbortSignal.timeout(c.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`LNN Tools ${res.status} ${path}: ${(await res.text()).slice(0, 300)}`);
+  return (await res.json()) as T;
 }
 
 async function getItems(c: LnnClient, q: URLSearchParams): Promise<LnnListItem[]> {
-  const path = `/archive/articles?${q}`;
-  const res = await fetch(`${c.baseUrl || DEFAULT_BASE}${path}`, {
-    headers: { Authorization: `Bearer ${c.token}`, "User-Agent": USER_AGENT },
-  });
-  if (!res.ok) throw new Error(`LNN Tools ${res.status} ${path}: ${(await res.text()).slice(0, 300)}`);
-  return ((await res.json()) as { items?: LnnListItem[] }).items ?? [];
+  return (await getJson<{ items?: LnnListItem[] }>(c, `/archive/articles?${q}`)).items ?? [];
 }
 
 /** +1s on an ISO UTC instant (`until` is exclusive; see listSite). */
@@ -143,6 +154,53 @@ export async function listRetracted(
   if (items.length >= PAGE_LIMIT) console.warn(`[lnntools] ${items.length} retractions since ${goneSince}; oldest may be cut off`);
   // Only in-scope sites, and only rows that really are retracted.
   return items.filter((a) => a.gone_at && a.site in SITE_BY_SLUG);
+}
+
+/** One site's entry in GET /archive/health (the fields the coverage check reads). */
+export interface LnnSiteHealth {
+  slug: string;
+  articles?: number;
+  oldest?: string; // ISO UTC of the oldest article LNN Tools holds
+  newest?: string;
+  backfill_done?: boolean; // history import complete
+  last_ok_at?: string; // last successful sync with WordPress
+  last_error?: string | null;
+}
+
+export async function fetchHealth(c: LnnClient): Promise<LnnSiteHealth[]> {
+  return (await getJson<{ sites?: LnnSiteHealth[] }>(c, "/archive/health")).sites ?? [];
+}
+
+/**
+ * Why LNN Tools can't be trusted to hold every article in [fromIso, toIso) — empty
+ * when it can. Guards the quarterly archive against a silently partial build: if
+ * the office box is down and a cloud backup holding only the last few days is
+ * answering, a scheduled run would otherwise "succeed" with a fraction of the
+ * quarter. Requires, per site: history import done, oldest article at or before
+ * the window start, and a WordPress sync since the window ended (or within the
+ * last 30 minutes, for a window that ends now).
+ */
+export function coverageProblems(
+  health: LnnSiteHealth[],
+  opts: { fromIso: string; toIso: string; nowMs: number; sites?: readonly SiteName[] }
+): string[] {
+  const problems: string[] = [];
+  const syncedBy = new Date(Math.min(Date.parse(opts.toIso), opts.nowMs - 30 * 60_000)).toISOString();
+  for (const site of opts.sites ?? SITES_IN_SCOPE) {
+    const h = health.find((x) => x.slug === SLUG[site]);
+    if (!h) {
+      problems.push(`${site}: missing from LNN Tools /archive/health`);
+      continue;
+    }
+    if (h.backfill_done !== true) problems.push(`${site}: LNN Tools' history import isn't complete (backfill_done=${h.backfill_done})`);
+    if (!h.oldest || Date.parse(h.oldest) > Date.parse(opts.fromIso)) {
+      problems.push(`${site}: LNN Tools' oldest article is ${h.oldest ?? "unknown"}, after the window start ${opts.fromIso} (partial data — e.g. the cloud backup answering?)`);
+    }
+    if (!h.last_ok_at || Date.parse(h.last_ok_at) < Date.parse(syncedBy)) {
+      problems.push(`${site}: LNN Tools last synced with WordPress at ${h.last_ok_at ?? "never"}, before ${syncedBy} — articles at the end of the window may be missing`);
+    }
+  }
+  return problems;
 }
 
 /**

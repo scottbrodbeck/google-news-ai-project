@@ -1,15 +1,5 @@
 import { buildFeed } from "../lib/render";
-import {
-  SITES_IN_SCOPE, SITE_WP_BASE, WP_SEEN_CAP, WP_HASH_CAP,
-  WP_UPDATE_LOOKBACK_MIN, WP_UPDATE_MAX_PER_CYCLE, WP_UPDATE_MAX_PER_HOUR,
-  WP_UPDATE_MAX_PER_DAY, WP_UPDATE_MAX_PER_POST_PER_HOUR,
-} from "../lib/config";
-import {
-  fetchRecentIds, fetchPostsByIds, fetchRecentPosts, fetchModifiedSince, selectNewPosts, selectUpdatedPosts,
-  contentHash, toWebhookPayload, type WpPost,
-} from "../lib/wordpress";
 import { listArticles, listRetracted, assembleLive, type LnnClient } from "../lib/lnntools";
-import type { SiteName } from "../lib/types";
 import { LOGO_PNG } from "./logo";
 
 /** Worker bindings + vars + secrets. */
@@ -25,18 +15,13 @@ export interface Env {
   CHANNEL_LINK?: string; // publisher homepage for the channel <link>
   WINDOW_DAYS: string;
   TOMBSTONE_DAYS: string;
-  // Publish poller (WordPress REST -> same Zapier webhook). INGEST_WEBHOOK_URL is a secret.
-  INGEST_WEBHOOK_URL?: string;
-  WP_POLL_ENABLED?: string;
-  WP_DRY_RUN?: string;
-  // Updated-article poller — a SEPARATE Zapier hook from the publish one.
-  UPDATE_WEBHOOK_URL?: string;
-  WP_UPDATE_POLL_ENABLED?: string;
 }
 
 const LIVE_KEY = "live/google-news.xml";
 const LIVE_META = "live/google-news.meta.json";
 const STALE_MS = 5 * 60 * 1000;
+/** LNN Tools calls from the Worker give up after this (the API usually answers in <1 s). */
+const LNN_TIMEOUT_MS = 10_000;
 const MAX_BYTES = 50 * 1024 * 1024; // 50 MiB hard limit per Google
 
 /**
@@ -61,7 +46,7 @@ async function buildLive(env: Env): Promise<{ xml: string; count: number; bytes:
   const windowDays = Number(env.WINDOW_DAYS || "3");
   const tombDays = Number(env.TOMBSTONE_DAYS || "14");
   const now = Date.now();
-  const client: LnnClient = { token: env.LNN_API_TOKEN, baseUrl: env.LNN_API_BASE };
+  const client: LnnClient = { token: env.LNN_API_TOKEN, baseUrl: env.LNN_API_BASE, timeoutMs: LNN_TIMEOUT_MS };
 
   const [current, retracted] = await Promise.all([
     listArticles(client, isoSeconds(now - windowDays * DAY_MS)),
@@ -101,205 +86,6 @@ async function writeLive(env: Env): Promise<void> {
   console.log(`live rebuilt: ${built.count} items, ${built.bytes} bytes`);
 }
 
-// --- Publish poller: WordPress REST -> same Zapier webhook (replaces the WP plugin) ---
-const seenKey = (site: string) => `state/wp-seen-${site}.json`;
-interface SeenState {
-  ids: number[]; // new-post dedup, by WordPress post id
-  cursor?: string; // high-water mark of processed modified_gmt (UTC, no offset)
-  hashes?: Record<string, string>; // postId -> content fingerprint (the loop guard's baseline)
-  fires?: number[]; // epoch ms of update fires, rolling 24h — feeds the ceilings
-  perPost?: Record<string, number[]>; // per-article fire times, rolling 1h
-  updatedAt: string;
-}
-
-async function loadState(env: Env, site: string): Promise<SeenState | null> {
-  const obj = await env.FEED_BUCKET.get(seenKey(site));
-  if (!obj) return null;
-  const s = await obj.json<SeenState>().catch(() => null);
-  if (!s) return null;
-  return { ids: s.ids ?? [], cursor: s.cursor, hashes: s.hashes ?? {}, fires: s.fires ?? [], perPost: s.perPost ?? {}, updatedAt: s.updatedAt };
-}
-
-/** Single write per site per run — both pollers mutate one object, so they can't clobber each other. */
-async function saveState(env: Env, site: string, s: SeenState): Promise<void> {
-  const ids = s.ids.slice(-WP_SEEN_CAP);
-  // Retain hashes only for ids we still track, newest-first, capped.
-  const keep = new Set(ids.map(String));
-  const hashes: Record<string, string> = {};
-  for (const id of Object.keys(s.hashes ?? {}).slice(-WP_HASH_CAP)) {
-    if (keep.has(id) || Object.keys(hashes).length < WP_HASH_CAP) hashes[id] = s.hashes![id]!;
-  }
-  await env.FEED_BUCKET.put(
-    seenKey(site),
-    JSON.stringify({ ids, cursor: s.cursor, hashes, fires: s.fires, perPost: s.perPost, updatedAt: new Date().toISOString() }),
-    { httpMetadata: { contentType: "application/json" } }
-  );
-}
-
-const prune = (ts: number[] | undefined, now: number, windowMs: number) => (ts ?? []).filter((t) => now - t < windowMs);
-
-/** Rolling-window ceilings. Returns why firing is blocked, or null when allowed. */
-function breakerReason(s: SeenState, postId: number, now: number): string | null {
-  const hour = prune(s.fires, now, 3_600_000).length;
-  const day = prune(s.fires, now, 86_400_000).length;
-  if (hour >= WP_UPDATE_MAX_PER_HOUR) return `hourly ceiling ${WP_UPDATE_MAX_PER_HOUR} reached`;
-  if (day >= WP_UPDATE_MAX_PER_DAY) return `daily ceiling ${WP_UPDATE_MAX_PER_DAY} reached`;
-  const perPost = prune(s.perPost?.[String(postId)], now, 3_600_000).length;
-  if (perPost >= WP_UPDATE_MAX_PER_POST_PER_HOUR) return `post ceiling ${WP_UPDATE_MAX_PER_POST_PER_HOUR}/h reached`;
-  return null;
-}
-
-function recordFire(s: SeenState, postId: number, now: number): void {
-  s.fires = [...prune(s.fires, now, 86_400_000), now];
-  s.perPost = s.perPost ?? {};
-  s.perPost[String(postId)] = [...prune(s.perPost[String(postId)], now, 3_600_000), now];
-  // Drop per-post history that has fully aged out, so the object can't grow forever.
-  for (const [k, v] of Object.entries(s.perPost)) if (v.length === 0) delete s.perPost[k];
-}
-
-async function firePayload(env: Env, url: string, post: WpPost, dryRun: boolean, tag: string): Promise<void> {
-  const payload = toWebhookPayload(post);
-  if (dryRun) {
-    console.log(`[${tag}] DRY-RUN would fire id=${post.id} "${payload.Headline}"`);
-    return;
-  }
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw new Error(`webhook ${res.status}: ${await res.text()}`);
-  console.log(`[${tag}] fired id=${post.id} "${payload.Headline}"`);
-}
-
-/** Read-only: fetch recent posts and determine which are new. `bootstrap` = first run for this site. */
-async function newPostsForSite(
-  env: Env,
-  site: SiteName
-): Promise<{ bootstrap: boolean; fresh: WpPost[]; posts: WpPost[]; priorIds: number[] }> {
-  const posts = await fetchRecentPosts(SITE_WP_BASE[site]);
-  const state = await loadState(env, site);
-  if (state === null) return { bootstrap: true, fresh: [], posts, priorIds: [] };
-  return { bootstrap: false, fresh: selectNewPosts(posts, state.ids), posts, priorIds: state.ids };
-}
-
-/**
- * Poll one site: new posts first, then updates, against one shared state object.
- * New-first matters — the Zap must see a brand-new post before any update for
- * it can fire, and firing it seeds the content hash that suppresses the
- * publish-time summary write-back from looking like an edit.
- */
-async function pollSite(env: Env, site: SiteName, dryRun: boolean, updatesOn: boolean): Promise<void> {
-  const now = Date.now();
-  const base = SITE_WP_BASE[site];
-  const recent = await fetchRecentIds(base); // cheap: ids + dates only
-  let state = await loadState(env, site);
-
-  // --- Bootstrap: record what's already published + hash it, fire nothing ---
-  if (state === null) {
-    const posts = await fetchRecentPosts(base); // one-time full fetch to seed baseline hashes
-    const hashes: Record<string, string> = {};
-    for (const p of posts) hashes[String(p.id)] = contentHash(p);
-    state = { ids: posts.map((p) => p.id), cursor: new Date(now).toISOString().slice(0, 19), hashes, fires: [], perPost: {}, updatedAt: "" };
-    await saveState(env, site, state);
-    console.log(`[wp-poll] ${site}: bootstrapped ${state.ids.length} ids + hashes (no webhooks fired)`);
-    return;
-  }
-
-  let dirty = false;
-  const justPublished = new Set<number>();
-
-  // --- New posts --- full content is fetched only for ids we haven't seen
-  const unseen = selectNewPosts(recent as WpPost[], state.ids).map((p) => p.id);
-  const fresh = unseen.length ? selectNewPosts(await fetchPostsByIds(base, unseen), state.ids) : [];
-  for (const post of fresh) {
-    try {
-      await firePayload(env, env.INGEST_WEBHOOK_URL!, post, dryRun, `wp-new ${site}`);
-      state.ids.push(post.id);
-      state.hashes![String(post.id)] = contentHash(post); // baseline: kills the publish-echo update
-      justPublished.add(post.id);
-      dirty = true;
-    } catch (err) {
-      // Left unseen -> retried next cron. (The Zap's own last-headline check guards repeats.)
-      console.error(`[wp-new ${site}] id=${post.id} failed: ${(err as Error).message}`);
-    }
-  }
-
-  // --- Updates ---
-  if (updatesOn) {
-    const from = new Date(Date.parse(`${state.cursor ?? new Date(now).toISOString().slice(0, 19)}Z`) - WP_UPDATE_LOOKBACK_MIN * 60_000)
-      .toISOString()
-      .slice(0, 19);
-    const modified = await fetchModifiedSince(base, from);
-    const sel = selectUpdatedPosts(modified, { hashes: state.hashes ?? {}, justPublished, nowMs: now });
-
-    let fired = 0;
-    let blocked: string | null = null;
-    let oldestFailure: string | undefined;
-
-    for (const post of sel.candidates) {
-      if (fired >= WP_UPDATE_MAX_PER_CYCLE) {
-        blocked = `per-cycle cap ${WP_UPDATE_MAX_PER_CYCLE}`;
-        break; // remainder carried to the next run (cursor is held back below)
-      }
-      const reason = breakerReason(state, post.id, now);
-      if (reason) {
-        blocked = reason;
-        break;
-      }
-      try {
-        await firePayload(env, env.UPDATE_WEBHOOK_URL!, post, dryRun, `wp-upd ${site}`);
-        state.hashes![String(post.id)] = contentHash(post);
-        recordFire(state, post.id, now);
-        fired++;
-        dirty = true;
-      } catch (err) {
-        console.error(`[wp-upd ${site}] id=${post.id} failed: ${(err as Error).message}`);
-        if (!oldestFailure && post.modified_gmt) oldestFailure = post.modified_gmt;
-      }
-    }
-
-    // Advance the cursor, but never past work we didn't finish — anything blocked
-    // or failed must be re-fetched next run rather than silently dropped.
-    const unfinished = oldestFailure ?? (blocked ? sel.candidates[fired]?.modified_gmt : undefined);
-    const next = unfinished
-      ? new Date(Date.parse(`${unfinished}Z`) - 1000).toISOString().slice(0, 19)
-      : sel.newestModified;
-    if (next && next !== state.cursor) {
-      state.cursor = next;
-      dirty = true;
-    }
-    if (blocked) console.warn(`[wp-upd ${site}] THROTTLED after ${fired} fires — ${blocked}`);
-    if (sel.candidates.length || sel.skippedUnchanged) {
-      console.log(
-        `[wp-upd ${site}] scanned=${modified.length} fired=${fired} unchanged=${sel.skippedUnchanged} tooOld=${sel.skippedTooOld} publishEcho=${sel.skippedJustPublished}`
-      );
-    }
-  }
-
-  if (dirty) await saveState(env, site, state);
-}
-
-async function pollAndNotify(env: Env): Promise<void> {
-  const dryRun = env.WP_DRY_RUN === "true";
-  if (!dryRun && !env.INGEST_WEBHOOK_URL) {
-    console.error("[wp-poll] enabled but INGEST_WEBHOOK_URL is unset — skipping");
-    return;
-  }
-  const updatesOn = env.WP_UPDATE_POLL_ENABLED === "true";
-  if (updatesOn && !dryRun && !env.UPDATE_WEBHOOK_URL) {
-    console.error("[wp-upd] update poll enabled but UPDATE_WEBHOOK_URL is unset — updates skipped");
-  }
-  const doUpdates = updatesOn && (dryRun || !!env.UPDATE_WEBHOOK_URL);
-  for (const site of SITES_IN_SCOPE) {
-    try {
-      await pollSite(env, site, dryRun, doUpdates);
-    } catch (err) {
-      console.error(`[wp-poll] ${site} poll error: ${(err as Error).message}`);
-    }
-  }
-}
-
 function rss(xml: string): Response {
   return new Response(xml, {
     headers: { "Content-Type": "application/rss+xml; charset=utf-8", "Cache-Control": "public, max-age=120" },
@@ -314,10 +100,9 @@ export default {
   // Cron (*/2): rebuild the cached live feed.
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(writeLive(env));
-    if (env.WP_POLL_ENABLED === "true") ctx.waitUntil(pollAndNotify(env));
   },
 
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname;
 
@@ -341,95 +126,34 @@ export default {
       });
     }
 
-    // --- Poller preview (read-only): /gn/poll?key=<secret> — shows what WOULD fire, no side effects ---
-    if (path === "/gn/poll") {
-      if (url.searchParams.get("key") !== env.FEED_SECRET) return notFound();
-      const now = Date.now();
-      const report: Record<string, unknown> = {
-        flags: {
-          newPolling: env.WP_POLL_ENABLED === "true",
-          updatePolling: env.WP_UPDATE_POLL_ENABLED === "true",
-          dryRun: env.WP_DRY_RUN === "true",
-          caps: {
-            perCycle: WP_UPDATE_MAX_PER_CYCLE,
-            perHour: WP_UPDATE_MAX_PER_HOUR,
-            perDay: WP_UPDATE_MAX_PER_DAY,
-            perPostPerHour: WP_UPDATE_MAX_PER_POST_PER_HOUR,
-          },
-        },
-      };
-      for (const site of SITES_IN_SCOPE) {
-        try {
-          const { bootstrap, fresh, posts } = await newPostsForSite(env, site);
-          if (bootstrap) {
-            report[site] = { bootstrap: true, seenIfActivated: posts.length };
-            continue;
-          }
-          const state = (await loadState(env, site))!;
-          const from = new Date(
-            Date.parse(`${state.cursor ?? new Date(now).toISOString().slice(0, 19)}Z`) - WP_UPDATE_LOOKBACK_MIN * 60_000
-          )
-            .toISOString()
-            .slice(0, 19);
-          const modified = await fetchModifiedSince(SITE_WP_BASE[site], from);
-          const sel = selectUpdatedPosts(modified, {
-            hashes: state.hashes ?? {},
-            justPublished: new Set(fresh.map((p) => p.id)),
-            nowMs: now,
-          });
-          report[site] = {
-            newWouldFire: fresh.map((p) => ({ id: p.id, headline: toWebhookPayload(p).Headline })),
-            updates: {
-              cursor: state.cursor,
-              scanned: modified.length,
-              wouldFire: sel.candidates.map((p) => ({ id: p.id, modified: p.modified_gmt, headline: toWebhookPayload(p).Headline })),
-              // High `unchanged` is the loop guard working: Zapier's summary
-              // write-back bumps `modified` without changing anything we send.
-              skipped: {
-                unchanged: sel.skippedUnchanged,
-                tooOld: sel.skippedTooOld,
-                publishEcho: sel.skippedJustPublished,
-              },
-              firesLastHour: prune(state.fires, now, 3_600_000).length,
-              firesLastDay: prune(state.fires, now, 86_400_000).length,
-              baselineHashes: Object.keys(state.hashes ?? {}).length,
-            },
-          };
-        } catch (err) {
-          report[site] = { error: (err as Error).message };
-        }
-      }
-      return new Response(JSON.stringify(report, null, 2), {
-        headers: { "Content-Type": "application/json; charset=utf-8" },
-      });
-    }
-
     // --- Live feed: /gn/<token>.xml?key=<secret> ---
     if (path === `/gn/${env.FEED_PATH_TOKEN}.xml`) {
       if (url.searchParams.get("key") !== env.FEED_SECRET) return notFound();
 
       const obj = await env.FEED_BUCKET.get(LIVE_KEY);
-      let stale = !obj;
-      if (obj) {
-        const meta = await env.FEED_BUCKET.get(LIVE_META);
-        const m = meta ? await meta.json<{ builtAt: string }>().catch(() => null) : null;
-        if (!m || Date.now() - new Date(m.builtAt).getTime() > STALE_MS) stale = true;
-      }
 
-      if (stale) {
-        // Fallback build so Google never gets an empty/expired response.
+      // Nothing cached at all (first deploy, wiped bucket): the only case where
+      // Google waits on a build — there's nothing else to give it.
+      if (!obj) {
         try {
           const built = await buildLive(env);
           await putLive(env, built);
           return rss(built.xml);
         } catch (err) {
-          // Source down / bad token: the last good feed beats a 500. Only with
-          // nothing cached at all is there nothing to serve.
-          console.error(`[live] fallback build failed, serving cached feed: ${String(err)}`);
-          if (!obj) return new Response("Feed temporarily unavailable", { status: 503, headers: { "Retry-After": "120" } });
+          console.error(`[live] cold build failed: ${String(err)}`);
+          return new Response("Feed temporarily unavailable", { status: 503, headers: { "Retry-After": "120" } });
         }
       }
-      return new Response(obj!.body, {
+
+      // Otherwise ALWAYS answer from the cached copy immediately. If it's stale (the
+      // cron hasn't managed a rebuild — e.g. LNN Tools is down or failing over),
+      // try a rebuild in the background; Google never waits on LNN Tools.
+      const meta = await env.FEED_BUCKET.get(LIVE_META);
+      const m = meta ? await meta.json<{ builtAt: string }>().catch(() => null) : null;
+      if (!m || Date.now() - new Date(m.builtAt).getTime() > STALE_MS) {
+        ctx.waitUntil(writeLive(env).catch((err) => console.error(`[live] background rebuild failed: ${String(err)}`)));
+      }
+      return new Response(obj.body, {
         headers: { "Content-Type": "application/rss+xml; charset=utf-8", "Cache-Control": "public, max-age=120" },
       });
     }

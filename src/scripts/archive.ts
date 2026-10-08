@@ -13,7 +13,7 @@ import { writeFile, mkdir } from "node:fs/promises";
 import { zipSync } from "fflate";
 import { AwsClient } from "aws4fetch";
 
-import { listSite, mapItem, type LnnClient } from "../lib/lnntools";
+import { listSite, mapItem, fetchHealth, coverageProblems, type LnnClient } from "../lib/lnntools";
 import { buildFeed } from "../lib/render";
 import { SITES_IN_SCOPE, SITE_LOGO } from "../lib/config";
 import { easternDayKey, easternYear, lastCompletedQuarter, parseQuarter, quarterOfDay, type Quarter } from "../lib/dates";
@@ -42,13 +42,12 @@ interface DayGroup {
   articles: ArticleRecord[];
 }
 
-async function collectGroups(q: Quarter, onlyDay?: string): Promise<DayGroup[]> {
+async function collectGroups(client: LnnClient, q: Quarter, onlyDay?: string): Promise<DayGroup[]> {
   const groups = new Map<string, DayGroup>();
   // For a single-day sample, scope the query to that ET day (±1 day for TZ slack);
   // otherwise pull the whole quarter window. Exact ET-day filtering still happens in JS.
   const fromUTC = onlyDay ? dayBoundUTC(onlyDay, -1) : q.fetchFromUTC;
   const toUTC = onlyDay ? dayBoundUTC(onlyDay, 2) : q.fetchToUTC;
-  const client: LnnClient = { token: required("LNN_API_TOKEN"), baseUrl: process.env.LNN_API_BASE };
   for (const site of SITES_IN_SCOPE) {
     // listSite returns live articles only: retracted ones are omitted from the
     // archive entirely (no tombstones in a snapshot). Rows carry their bodies.
@@ -169,7 +168,28 @@ async function main(): Promise<void> {
       : lastCompletedQuarter();
 
   console.log(`Building ${sampleDay ? `sample day ${sampleDay}` : `quarter ${q.label}`} (ET ${q.etStart}..${q.etEnd})`);
-  const groups = await collectGroups(q, sampleDay);
+  // Archive pages carry 200 article bodies each; give them longer than the Worker's 10 s.
+  const client: LnnClient = { token: required("LNN_API_TOKEN"), baseUrl: process.env.LNN_API_BASE, timeoutMs: 60_000 };
+
+  // Refuse to build from partial data. If the office box is down and a cloud backup
+  // holding only recent days is answering, this run would otherwise "succeed" with a
+  // fraction of the window — and Zapier would deliver it. Fail loudly instead; re-run
+  // once LNN Tools has its full history back.
+  const firstDay = sampleDay ?? q.etStart;
+  const lastDay = sampleDay ?? q.etEnd;
+  const problems = coverageProblems(await withRetry(() => fetchHealth(client)), {
+    fromIso: dayBoundUTC(firstDay, 0), // 00:00 UTC = the evening before the first ET day: a safe lower bound
+    toIso: new Date(Date.parse(dayBoundUTC(lastDay, 1)) + 5 * 3_600_000).toISOString(), // >= ET midnight after the last day
+    nowMs: Date.now(),
+  });
+  if (problems.length) {
+    throw new Error(
+      `Refusing to build: LNN Tools doesn't hold the whole window, so the archive would be incomplete.\n  - ${problems.join("\n  - ")}`
+    );
+  }
+  console.log("LNN Tools coverage OK for the whole window.");
+
+  const groups = await collectGroups(client, q, sampleDay);
   const files = buildFiles(groups);
   const fileNames = Object.keys(files);
   console.log(`Generated ${fileNames.length} files across ${SITES_IN_SCOPE.length} publications.`);
@@ -204,7 +224,10 @@ async function main(): Promise<void> {
   console.log("Wrote out/result.json");
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
   console.error(err);
+  // Give the GitHub Actions -> Zapier callback the reason, not just "failure".
+  await mkdir("out", { recursive: true }).catch(() => {});
+  await writeFile("out/result.json", JSON.stringify({ error: String((err as Error)?.message ?? err) }, null, 2)).catch(() => {});
   process.exit(1);
 });
