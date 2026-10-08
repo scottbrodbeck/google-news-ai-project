@@ -83,4 +83,4 @@ Open the feed URL in a browser. You should see XML listing recent articles from 
 | Change the schedule or notifications | Zapier |
 | Rotate the feed key, see secrets | Cloudflare → Workers → `google-news-feed` |
 | Pull/edit article content | WordPress (the feed reads it via LNN Tools) |
-| Stop/start the new-article webhook poller | `wrangler.toml` → `WP_POLL_ENABLED`, then `npm run deploy` |
+| New-article notices / update notices | LNN Tools (the Worker's old WordPress poller is off and retired) |
